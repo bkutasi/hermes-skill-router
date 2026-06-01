@@ -1,0 +1,6 @@
+name: eagle-eye
+version: 1.0.0
+description: "5-layer intelligent skill matching — narrows 100+ skills to top-5 via hard triggers, FTS5, synonym dictionary, dense embedding, and RRF fusion. Zero core modification."
+author: "willingning-coder"
+hooks:
+  - pre_llm_call
