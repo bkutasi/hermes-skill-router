@@ -462,6 +462,11 @@ class SkillRetriever:
         avoids pulling PyTorch into the Hermes venv and lets you serve
         embeddings from a dedicated model server.
 
+        The embedding matrix is cached to disk so that a gateway restart
+        does NOT trigger a full re-embedding of all skills via HTTP.  The
+        cache is invalidated when skill names/descriptions change or when
+        the embedding endpoint URL/model changes.
+
         Configuration via environment variables:
           HERMES_EMBEDDING_BASE_URL  (default: http://localhost:8080/v1)
           HERMES_EMBEDDING_MODEL     (default: default — llama.cpp ignores it)
@@ -486,9 +491,37 @@ class SkillRetriever:
         self._emb_api_key = api_key
         self._emb_model_name = model_name
 
+        # Build a cache key from the skill set + endpoint config.
+        # If anything changes (new skill, edited description, different
+        # embedding model/URL), the cache is invalidated automatically.
+        import hashlib
+        texts = [f"{n}, {d}" for n, d in zip(self._skill_names, self._skill_descs)]
+        manifest_src = "\n".join(texts) + f"\n{base_url}\n{model_name}"
+        cache_key = hashlib.sha256(manifest_src.encode("utf-8")).hexdigest()[:16]
+
+        # Cache path: ~/.hermes/.eagle_eye_emb_cache.npz
+        from hermes_constants import get_hermes_home
+        cache_path = get_hermes_home() / ".eagle_eye_emb_cache.npz"
+
+        # ── Try disk cache first ──
+        if cache_path.exists():
+            try:
+                cached = np.load(cache_path, allow_pickle=False)
+                if str(cached["cache_key"]) == cache_key:
+                    self._emb_matrix = cached["embeddings"].astype(np.float32)
+                    logger.info(
+                        "Embedding cache HIT: loaded %s from disk (%.1fMB)",
+                        self._emb_matrix.shape,
+                        self._emb_matrix.nbytes / 1e6,
+                    )
+                    return
+                else:
+                    logger.info("Embedding cache miss: skill set changed, re-embedding")
+            except Exception as e:
+                logger.debug("Embedding cache read failed: %s", e)
+
+        # ── Cache miss: embed all skills via HTTP in batches ──
         try:
-            # Embed all skills in batches (avoid overwhelming the endpoint)
-            texts = [f"{n}, {d}" for n, d in zip(self._skill_names, self._skill_descs)]
             headers = {"Content-Type": "application/json"}
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
@@ -510,13 +543,22 @@ class SkillRetriever:
                 for item in sorted_data:
                     all_embeddings.append(item["embedding"])
 
-            import numpy as np
             self._emb_matrix = np.array(all_embeddings, dtype=np.float32)
 
             # L2-normalize for cosine similarity via dot product
             norms = np.linalg.norm(self._emb_matrix, axis=1, keepdims=True)
             norms[norms == 0] = 1.0
             self._emb_matrix = self._emb_matrix / norms
+
+            # Save to disk cache
+            try:
+                np.savez(cache_path, embeddings=self._emb_matrix, cache_key=np.array(cache_key))
+                logger.info(
+                    "Embedding matrix cached to disk: %s (%.1fMB)",
+                    cache_path, self._emb_matrix.nbytes / 1e6,
+                )
+            except Exception as e:
+                logger.debug("Could not write embedding cache: %s", e)
 
             logger.info(
                 "Embedding model loaded via HTTP: %s, shape: %s",
