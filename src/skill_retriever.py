@@ -50,26 +50,26 @@ _SINGLETON_LOCK = threading.Lock()
 # Maps exact substring → skill name. Order matters: first match wins.
 # These bypass all ranking — if query contains the trigger, return directly.
 #
-# CUSTOMIZATION: Replace the examples below with your own skill mappings.
-# Run `python scripts/generate_config.py` to auto-generate from your skill library.
-# See templates/hard_triggers.example.py for the format.
+# Triggers are auto-generated from your skill library by:
+#   python scripts/build_real_config.py
+# Edit src/hard_triggers_generated.py and re-run if skills change.
 _HARD_TRIGGERS: list[tuple[str, str]] = [
-    # ── Example triggers (replace with your own) ──
-    # Format: ("trigger_keyword", "skill-name"),
-    #
-    # Engineering
-    ("debug", "systematic-debugging"),
-    ("调试", "systematic-debugging"),
-    ("代码审查", "zh-code-review"),
-    ("code review", "zh-code-review"),
-    ("TDD", "test-driven-development"),
-    ("测试驱动", "test-driven-development"),
-    # Skills management
-    ("创建技能", "skill-creation-guide"),
-    ("SKILL.md", "skill-creation-guide"),
-    ("找技能", "find-skills"),
-    ("安装技能", "find-skills"),
+    # ── Auto-generated (from build_real_config.py) ──
 ]
+
+# Load generated triggers at import time
+try:
+    from pathlib import Path as _Path
+    _triggers_file = _Path(__file__).parent / "hard_triggers_generated.py"
+    if _triggers_file.exists():
+        _generated: list[tuple[str, str]] = []
+        _ns: dict = {}
+        exec(compile(_triggers_file.read_text(encoding="utf-8"), str(_triggers_file), "exec"), _ns)
+        _generated = _ns.get("_HARD_TRIGGERS", [])
+        _HARD_TRIGGERS = _generated
+        logger.info("Loaded %d hard triggers from %s", len(_HARD_TRIGGERS), _triggers_file.name)
+except Exception as _e:
+    logger.warning("Failed to load generated triggers: %s", _e)
 
 
 def _is_subsequence(chars: list[str], text: str, max_gap: int = 3) -> bool:
@@ -118,9 +118,11 @@ class SkillRetriever:
         self._synonyms: dict[str, list[str]] = {}       # skill → [syn, ...]
         self._synonym_index: dict[str, list[tuple[str, float]]] = {}  # token → [(skill, weight)]
         self._skill_paths: dict[str, Path] = {}          # skill_name → SKILL.md path
-        # Embedding
+        # Embedding (HTTP-based, no local model)
         self._emb_matrix = None
-        self._model = None
+        self._emb_base_url = ""
+        self._emb_api_key = ""
+        self._emb_model_name = "default"
         self._jieba_initialized = False
         self._top_k = int(os.environ.get(_TOP_K_ENV, "5"))
         # Start background initialization immediately
@@ -173,7 +175,9 @@ class SkillRetriever:
                 logger.info("Skill retriever: initializing on first call...")
                 self._lazy_init()
             else:
-                for _ in range(300):
+                # Wait up to 120s for background init (embedding 230 skills
+                # via HTTP takes ~60s)
+                for _ in range(1200):
                     if not self._loading:
                         break
                     time.sleep(0.1)
@@ -320,27 +324,42 @@ class SkillRetriever:
         for base_dir in [skills_dir, hermes_agent_skills]:
             if not base_dir.exists():
                 continue
-            for cat_dir in sorted(base_dir.iterdir()):
-                if not cat_dir.is_dir():
+            self._scan_skill_dir(base_dir, seen, parent="")
+
+    def _scan_skill_dir(
+        self, base_dir: Path, seen: set[str], parent: str = ""
+    ) -> None:
+        """Recursively scan for SKILL.md files — handles flat and nested layouts.
+
+        Flat:   skills/<name>/SKILL.md
+        Nested: skills/<category>/<name>/SKILL.md
+        """
+        for entry in sorted(base_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            skill_md = entry / "SKILL.md"
+            if skill_md.exists():
+                name = entry.name
+                if name in seen:
                     continue
-                for skill_dir in sorted(cat_dir.iterdir()):
-                    if not skill_dir.is_dir():
-                        continue
-                    skill_md = skill_dir / "SKILL.md"
-                    if not skill_md.exists():
-                        continue
-                    name = skill_dir.name
-                    if name in seen:
-                        continue
-                    try:
-                        content = skill_md.read_text(encoding="utf-8")
-                        desc = self._extract_description(content)
-                        seen.add(name)
-                        self._skill_names.append(name)
-                        self._skill_descs.append(desc)
-                        self._skill_paths[name] = skill_md
-                    except Exception:
-                        pass
+                try:
+                    content = skill_md.read_text(encoding="utf-8")
+                    desc = self._extract_description(content)
+                    seen.add(name)
+                    self._skill_names.append(name)
+                    self._skill_descs.append(desc)
+                    self._skill_paths[name] = skill_md
+                except Exception:
+                    pass
+            else:
+                # Could be a category directory — recurse one level
+                has_skill_md = any(
+                    (sub / "SKILL.md").exists()
+                    for sub in entry.iterdir()
+                    if sub.is_dir()
+                )
+                if has_skill_md:
+                    self._scan_skill_dir(entry, seen, parent=entry.name)
 
     @staticmethod
     def _extract_description(content: str) -> str:
@@ -436,26 +455,73 @@ class SkillRetriever:
         }
 
     def _load_embedding_model(self) -> None:
-        """Layer 4: Load dense embedding model."""
+        """Layer 4: Load dense embedding model.
+
+        Uses an OpenAI-compatible HTTP embedding endpoint (e.g. llama.cpp
+        with jina-embeddings-v5) instead of sentence-transformers.  This
+        avoids pulling PyTorch into the Hermes venv and lets you serve
+        embeddings from a dedicated model server.
+
+        Configuration via environment variables:
+          HERMES_EMBEDDING_BASE_URL  (default: http://localhost:8080/v1)
+          HERMES_EMBEDDING_MODEL     (default: default — llama.cpp ignores it)
+          HERMES_EMBEDDING_API_KEY   (default: not-required)
+        """
         try:
-            from sentence_transformers import SentenceTransformer
             import numpy as np
+            import requests
         except ImportError:
-            logger.warning("sentence-transformers not installed; FTS5+Syn only")
+            logger.warning("numpy/requests not installed; FTS5+Syn only")
             self._emb_matrix = None
             return
 
-        model_name = os.environ.get(
-            "HERMES_EMBEDDING_MODEL",
-            "shibing624/text2vec-base-chinese-paraphrase"
+        base_url = os.environ.get(
+            "HERMES_EMBEDDING_BASE_URL",
+            "http://localhost:8080/v1",
         )
+        api_key = os.environ.get("HERMES_EMBEDDING_API_KEY", "")
+        model_name = os.environ.get("HERMES_EMBEDDING_MODEL", "default")
+
+        self._emb_base_url = base_url
+        self._emb_api_key = api_key
+        self._emb_model_name = model_name
+
         try:
-            self._model = SentenceTransformer(model_name)
+            # Embed all skills in batches (avoid overwhelming the endpoint)
             texts = [f"{n}, {d}" for n, d in zip(self._skill_names, self._skill_descs)]
-            self._emb_matrix = self._model.encode(
-                texts, normalize_embeddings=True, show_progress_bar=False
+            headers = {"Content-Type": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+
+            all_embeddings: list[list[float]] = []
+            batch_size = 16
+            for i in range(0, len(texts), batch_size):
+                batch = texts[i:i + batch_size]
+                resp = requests.post(
+                    f"{base_url}/embeddings",
+                    headers=headers,
+                    json={"input": batch, "model": model_name},
+                    timeout=60,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                # Sort by index to ensure order matches input
+                sorted_data = sorted(data["data"], key=lambda x: x["index"])
+                for item in sorted_data:
+                    all_embeddings.append(item["embedding"])
+
+            import numpy as np
+            self._emb_matrix = np.array(all_embeddings, dtype=np.float32)
+
+            # L2-normalize for cosine similarity via dot product
+            norms = np.linalg.norm(self._emb_matrix, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0
+            self._emb_matrix = self._emb_matrix / norms
+
+            logger.info(
+                "Embedding model loaded via HTTP: %s, shape: %s",
+                base_url, self._emb_matrix.shape,
             )
-            logger.info("Embedding model loaded: %s, shape: %s", model_name, self._emb_matrix.shape)
         except Exception as e:
             logger.warning("Embedding model load failed (%s); FTS5+Syn only", e)
             self._emb_matrix = None
@@ -554,13 +620,34 @@ class SkillRetriever:
         return ranked[:k]
 
     def _emb_search(self, query: str, k: int) -> list[tuple[int, float]]:
-        """Layer 4: Dense embedding cosine similarity."""
-        if self._model is None or self._emb_matrix is None:
+        """Layer 4: Dense embedding cosine similarity via HTTP endpoint."""
+        if self._emb_matrix is None:
             return []
 
         import numpy as np
+        import requests
 
-        query_emb = self._model.encode([query], normalize_embeddings=True)
+        try:
+            headers = {"Content-Type": "application/json"}
+            if getattr(self, "_emb_api_key", ""):
+                headers["Authorization"] = f"Bearer {self._emb_api_key}"
+
+            resp = requests.post(
+                f"{self._emb_base_url}/embeddings",
+                headers=headers,
+                json={"input": [query], "model": self._emb_model_name},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            query_emb = np.array(resp.json()["data"][0]["embedding"], dtype=np.float32)
+            # Normalize
+            norm = np.linalg.norm(query_emb)
+            if norm > 0:
+                query_emb = query_emb / norm
+        except Exception as e:
+            logger.debug("Embedding query failed: %s", e)
+            return []
+
         scores = np.dot(self._emb_matrix, query_emb.T).flatten()
         top_idx = np.argsort(-scores)[:k]
         return [(int(idx), float(scores[idx])) for idx in top_idx]

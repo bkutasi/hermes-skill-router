@@ -21,6 +21,38 @@ import yaml
 from pathlib import Path
 
 
+def _discover_from_dir(base_dir: Path, skills: list[dict], seen: set[str]) -> None:
+    """Recursively scan for SKILL.md files — handles flat and nested layouts."""
+    for entry in sorted(base_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        skill_md = entry / "SKILL.md"
+        if skill_md.exists():
+            name = entry.name
+            if name in seen:
+                continue
+            content = skill_md.read_text(encoding="utf-8")
+            desc = _extract_description(content)
+            triggers = _extract_triggers(content)
+            seen.add(name)
+            skills.append({
+                "name": name,
+                "category": base_dir.name,
+                "description": desc,
+                "triggers": triggers,
+                "path": str(skill_md),
+            })
+        else:
+            # Could be a category directory — recurse
+            has_skill_md = any(
+                (sub / "SKILL.md").exists()
+                for sub in entry.iterdir()
+                if sub.is_dir()
+            )
+            if has_skill_md:
+                _discover_from_dir(entry, skills, seen)
+
+
 def discover_skills() -> list[dict]:
     """Scan Hermes skill directories and extract skill metadata."""
     hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
@@ -35,32 +67,7 @@ def discover_skills() -> list[dict]:
     for base_dir in search_dirs:
         if not base_dir.exists():
             continue
-        for cat_dir in sorted(base_dir.iterdir()):
-            if not cat_dir.is_dir():
-                continue
-            category = cat_dir.name
-            for skill_dir in sorted(cat_dir.iterdir()):
-                if not skill_dir.is_dir():
-                    continue
-                skill_md = skill_dir / "SKILL.md"
-                if not skill_md.exists():
-                    continue
-                name = skill_dir.name
-                if name in seen:
-                    continue
-
-                content = skill_md.read_text(encoding="utf-8")
-                desc = _extract_description(content)
-                triggers = _extract_triggers(content)
-
-                seen.add(name)
-                skills.append({
-                    "name": name,
-                    "category": category,
-                    "description": desc,
-                    "triggers": triggers,
-                    "path": str(skill_md),
-                })
+        _discover_from_dir(base_dir, skills, seen)
 
     return skills
 

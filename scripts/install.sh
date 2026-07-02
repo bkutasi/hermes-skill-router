@@ -9,9 +9,8 @@ SRC_DIR="$(dirname "$0")/../src"
 
 echo "🦅 Installing Eagle Eye skill retriever..."
 
-# 1. Copy retrieval engine + synonym dictionary to agent/
+# 1. Copy retrieval engine to agent/
 cp "$SRC_DIR/skill_retriever.py" "$AGENT_DIR/"
-cp "$SRC_DIR/skill_synonyms.yaml" "$AGENT_DIR/"
 
 # 2. Create plugin directory and copy plugin + manifest
 mkdir -p "$PLUGIN_DIR"
@@ -44,12 +43,12 @@ echo ""
 echo "Checking dependencies..."
 VENV_PIP="$HERMES_HOME/hermes-agent/venv/bin/pip"
 if [ -f "$VENV_PIP" ]; then
-    "$VENV_PIP" install jieba sentence-transformers --quiet 2>/dev/null && \
+    "$VENV_PIP" install jieba numpy requests --quiet 2>/dev/null && \
         echo "  ✅ Dependencies installed" || \
         echo "  ⚠️  Some dependencies failed — check manually"
 else
     echo "  ⚠️  Hermes venv not found at $VENV_PIP"
-    echo "     Install manually: pip install jieba sentence-transformers"
+    echo "     Install manually: pip install jieba numpy requests"
 fi
 
 echo ""
@@ -57,5 +56,5 @@ echo "Installation complete! Restart Hermes to activate:"
 echo "  hermes gateway restart"
 echo ""
 echo "To disable: set HERMES_DISABLE_SKILL_RETRIEVAL=1"
-echo "To customize: edit src/skill_retriever.py and src/skill_synonyms.yaml"
-echo "To auto-generate: python scripts/generate_config.py"
+echo "To customize: run python scripts/build_real_config.py"
+echo "To auto-generate: python scripts/generate_config.py --scan-only"

@@ -2,7 +2,7 @@
 
 > **Narrow 100+ skills down to the right 5 — deterministic triggers, fuzzy matching, semantic search, and rank fusion. Zero core modification.**
 
-[中文文档](README_CN.md)
+Fork of [willingning-coder/eagle-eye](https://github.com/willingning-coder/eagle-eye) with HTTP-based embeddings, flat directory support, and a real config generator.
 
 ---
 
@@ -57,21 +57,25 @@ L2–L5 returns candidates, not conclusions. The LLM retains final authority to 
 
 ### 4. Each layer fails independently
 
-If `sentence-transformers` isn't installed, L4 degrades gracefully — L1+L2+L3 still work. If `jieba` is missing, L1+L4 still work. The system never crashes; it always falls back to a working subset.
+If the embedding endpoint is down, L4 degrades gracefully — L1+L2+L3 still work. If `jieba` is missing, L1+L4 still work. The system never crashes; it always falls back to a working subset.
+
+### 5. Coexist with the full skill index
+
+Eagle Eye does **not** replace Hermes' built-in skill index in the system prompt. Both layers work together — the full index stays as a safety net, while Eagle Eye adds high-confidence matches and semantic hints on top. This preserves the skill curator's ability to track usage and improve skills over time.
 
 ## Quick Start
 
 ```bash
 # 1. Clone
-git clone https://github.com/willingning-coder/eagle-eye.git
+git clone https://github.com/bkutasi/eagle-eye.git
 cd eagle-eye
 
 # 2. Generate config from your local skill library
-python scripts/generate_config.py
+python scripts/build_real_config.py
 
 # 3. Review and customize
-#    - Edit _HARD_TRIGGERS in src/skill_retriever.py
-#    - Edit src/skill_synonyms.yaml
+#    - Edit src/hard_triggers_generated.py (auto-generated triggers)
+#    - Edit src/skill_synonyms.yaml (auto-generated synonyms)
 #    (See PROMPTS.md for LLM-assisted generation)
 
 # 4. Install
@@ -88,7 +92,10 @@ Eagle Eye ships with **minimal example data**. The real power comes from generat
 ### Auto-Generate (Recommended)
 
 ```bash
-# Scan your skills and generate template configs
+# Generate real triggers + synonyms from your skill descriptions
+python scripts/build_real_config.py
+
+# Or use the basic generator (produces TODO templates)
 python scripts/generate_config.py
 
 # Or just list what was found
@@ -99,9 +106,9 @@ python scripts/generate_config.py --scan-only
 
 | Component | File | What to do |
 |-----------|------|------------|
-| **Hard Triggers** | `src/skill_retriever.py` → `_HARD_TRIGGERS` | Add `(keyword, skill-name)` tuples. More specific first. |
+| **Hard Triggers** | `src/hard_triggers_generated.py` | Add `(keyword, skill-name)` tuples. More specific first. |
 | **Synonym Dictionary** | `src/skill_synonyms.yaml` | Map natural language terms to skills. 5–15 per skill. |
-| **Embedding Model** | `HERMES_EMBEDDING_MODEL` env var | Swap to a different sentence-transformers model. |
+| **Embedding Endpoint** | `HERMES_EMBEDDING_BASE_URL` env var | Point to your OpenAI-compatible embedding server. |
 
 ### LLM-Assisted Generation
 
@@ -113,7 +120,9 @@ Use the prompts in [`PROMPTS_EN.md`](PROMPTS_EN.md) or [`PROMPTS_CN.md`](PROMPTS
 |----------|---------|-------------|
 | `HERMES_DISABLE_SKILL_RETRIEVAL` | *(unset)* | Set `1` to disable entirely |
 | `HERMES_SKILL_RETRIEVAL_TOP_K` | `5` | Number of skills to return |
-| `HERMES_EMBEDDING_MODEL` | `shibing624/text2vec-base-chinese-paraphrase` | Embedding model for L4 |
+| `HERMES_EMBEDDING_BASE_URL` | `http://localhost:8080/v1` | OpenAI-compatible embedding API base URL |
+| `HERMES_EMBEDDING_MODEL` | `default` | Model name for embedding API |
+| `HERMES_EMBEDDING_API_KEY` | *(unset)* | API key for embedding endpoint (if required) |
 
 ## Performance
 
@@ -121,9 +130,9 @@ Use the prompts in [`PROMPTS_EN.md`](PROMPTS_EN.md) or [`PROMPTS_CN.md`](PROMPTS
 |--------|-------|
 | L1 real-world accuracy | ~90% |
 | Functional test accuracy | 100% |
-| Query latency (cached) | ~20ms |
-| First-call latency | ~11s (model loading) |
-| Memory footprint | ~403MB (with embedding) |
+| Query latency (cached) | ~20ms + ~200ms HTTP embedding call |
+| First-call latency | ~40-60s (batch embedding of all skills) |
+| Memory footprint | ~50MB (embedding matrix only, no local model) |
 
 ## Architecture
 
@@ -141,11 +150,11 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md) for a deep technical dive covering:
 eagle-eye/
 ├── src/
 │   ├── skill_retriever.py      # Core 5-layer retrieval engine
-│   ├── skill_synonyms.yaml     # Synonym dictionary (template)
 │   ├── plugin.py               # Hermes plugin (pre_llm_call hook)
 │   └── plugin.yaml             # Plugin manifest
 ├── scripts/
-│   ├── generate_config.py      # Auto-generate config from your skills
+│   ├── build_real_config.py    # Generate real triggers + synonyms from skills
+│   ├── generate_config.py      # Basic config generator (TODO templates)
 │   └── install.sh              # One-command installation
 ├── templates/
 │   └── hard_triggers.example.py  # Trigger format reference
@@ -163,8 +172,36 @@ eagle-eye/
 | Package | Required? | Purpose |
 |---------|-----------|---------|
 | `jieba` | Yes | Chinese tokenization for L2–L3 |
-| `sentence-transformers` | Optional | Dense embedding for L4 (graceful fallback if missing) |
-| `numpy` | Optional | Numerical operations for L4 |
+| `numpy` | Yes | Numerical operations for L4 (embedding matrix) |
+| `requests` | Yes | HTTP calls to embedding endpoint for L4 |
+| An embedding server | Optional | Any OpenAI-compatible `/v1/embeddings` endpoint (llama.cpp, vLLM, Ollama, etc.) |
+
+> **Note:** This fork replaces `sentence-transformers` with HTTP-based embeddings. See [Changes from upstream](#changes-from-upstream) below.
+
+## Changes from upstream
+
+This fork is based on [willingning-coder/eagle-eye](https://github.com/willingning-coder/eagle-eye) v1.0.0 and includes the following changes:
+
+### v1.1.0 — HTTP Embeddings + Flat Directory Support
+
+**Breaking: Embedding backend changed from local model to HTTP API**
+
+- **Replaced `sentence-transformers` with HTTP-based embeddings.** The embedding layer (L4) now calls an OpenAI-compatible `/v1/embeddings` endpoint instead of loading a local PyTorch model. This removes the PyTorch dependency (~2GB), reduces memory footprint from ~403MB to ~50MB, and lets you use any embedding model served via llama.cpp, vLLM, Ollama, Infinity, or any OpenAI-compatible API.
+  - Configure via `HERMES_EMBEDDING_BASE_URL`, `HERMES_EMBEDDING_MODEL`, `HERMES_EMBEDDING_API_KEY` env vars.
+  - Embeddings are batched in groups of 16 to avoid overwhelming the endpoint.
+  - The embedding matrix is L2-normalized at init time; query embeddings are normalized at search time for cosine similarity via dot product.
+
+- **Fixed skill discovery for flat directory layouts.** The original code only handled `skills/<category>/<skill_name>/SKILL.md` (nested). Now also handles `skills/<skill_name>/SKILL.md` (flat) via recursive scanning. Both layouts can coexist in the same skills directory.
+
+- **Added `scripts/build_real_config.py`** — generates real hard triggers and synonyms from skill names and descriptions, with 70+ manual high-confidence triggers for common Hermes skill patterns. The original `generate_config.py` only produced TODO templates.
+
+- **Triggers loaded from external file.** `_HARD_TRIGGERS` is now loaded at import time from `hard_triggers_generated.py` (auto-generated, gitignored). This keeps user-specific triggers separate from the engine code.
+
+- **Increased init wait timeout** from 30s to 120s to accommodate HTTP embedding latency for large skill libraries (230+ skills take ~40-60s to embed in batches).
+
+- **Updated `install.sh`** to install `jieba numpy requests` instead of `jieba sentence-transformers`.
+
+- **Added `.gitignore`** for generated/user-specific files.
 
 ## Contributing
 

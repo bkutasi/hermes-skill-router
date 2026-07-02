@@ -1,26 +1,23 @@
-# Byte-compiled / optimized / DLL files
+# Python
 __pycache__/
 *.py[cod]
-*$py.class
-
-# Distribution / packaging
+*.egg-info/
 dist/
 build/
-*.egg-info/
+.eggs/
 
-# Virtual environments
-venv/
-.venv/
+# Generated / user-specific files
+generated/
+src/hard_triggers_generated.py
+src/skill_synonyms.yaml
 
 # IDE
-.idea/
 .vscode/
+.idea/
 *.swp
 *.swo
+*~
 
 # OS
 .DS_Store
 Thumbs.db
-
-# Generated config (user-specific)
-generated/
