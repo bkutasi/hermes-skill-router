@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+
+## [1.2.0] - 2026-07-08
+
+### Changed
+- **L1 direct injection**: Hard trigger hits now inject skill content directly into context (capped at 4000 chars), eliminating the `skill_view()` round-trip. Truncated skills include a note pointing to `skill_view()` for full content
+- **L2-5 richer hints**: Hint bullets now include skill descriptions (`- **name** — desc`) so the LLM can judge relevance without loading each skill
+- **Noise filter**: System-injected messages (`[ASYNC DELEGATION]`, `Review the conversation above`, `[Replying to:`, `[System`, `[Balázs`) are skipped before retrieval — no more false fires on non-user messages
+- L1 matches skip `skill_view()` / `skill_usage.bump_use()` — deterministic matches don't need curator tracking
+- L2-5 header includes `(Degraded: semantic search unavailable)` when embedding layer is down
+
+### Added
+- `get_skill_desc()` method on `SkillRetriever` — O(1) description lookup via `_skill_name_to_idx`
+- Query embedding cache (OrderedDict, 256 entries, LRU eviction)
+- Embedding readiness tracking with degraded mode logging
+- Embedding health check logged at plugin startup
+
 ## [1.1.0] - 2026-07-02
 
 ### Changed

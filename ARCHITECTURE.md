@@ -158,36 +158,47 @@ Eagle Eye uses the Hermes `pre_llm_call` plugin hook — zero core file modifica
 ```python
 # plugin.py
 def _on_pre_llm_call(*, user_message: str = "", **_kwargs) -> dict | None:
+    # Noise filter — skip system-injected messages
+    if user_message.strip().startswith(("[ASYNC DELEGATION", "[System", ...)):
+        return None
+
     retriever = get_skill_retriever()
     result = retriever.retrieve_detailed(user_message)
 
     if result["layer"] == "L1":
-        # Inject full SKILL.md content directly
-        return {"context": f"## Auto-loaded Skill: {skill_name}\n{content}"}
+        # Inject skill content directly (capped at 4000 chars)
+        content = retriever.get_skill_content(skill_name)[:4000]
+        return {"context": f"## Skill Routing (Hard Trigger: {skill_name})\n---\n{content}\n---\n"}
 
-    # L2-5: Inject lightweight hint
-    return {"context": f"## Skill Retrieval Hint\n- {skill_names}"}
+    # L2-5: Inject hint with descriptions
+    return {"context": f"## Skill Retrieval Hint\n- **{name}** — {desc}"}
 ```
 
 ### 3.2 Prompt Injection Format
-
-**L1 (hard trigger hit)**: Full skill content injected directly:
+**L1 (hard trigger hit)**: Skill content injected directly (capped at 4000 chars):
 ```
-## Auto-loaded Skill: skill-name
-[System note: This skill was automatically matched via hard trigger.]
+## Skill Routing (Hard Trigger: skill-name)
+[System: The skill "skill-name" was matched with 100% confidence.
+Its content is injected below.]
 
-[Full SKILL.md content here]
+---
+[SKILL.md content, up to 4000 chars]
+---
 ```
+If the skill content exceeds 4000 chars, it is truncated with a note:
+`Truncated — call skill_view("skill-name") for full content.`
 
-**L2-5 (pipeline hit)**: Lightweight hint, LLM decides:
+**L2-5 (pipeline hit)**: Lightweight hint with descriptions, LLM decides:
 ```
 ## Skill Retrieval Hint
 [System note: The following skills may be relevant to this query.
 Use your judgment — load via skill_view() if useful, or ignore.]
 
-- skill-name-1
-- skill-name-2
+- **skill-name-1** — Short description from skill metadata
+- **skill-name-2** — Short description from skill metadata
 ```
+When the embedding layer is unavailable, the header includes
+`(Degraded: semantic search unavailable)`.
 
 ### 3.3 Singleton Pattern
 
@@ -213,7 +224,7 @@ First call blocks for ~40-60s (batch HTTP embedding + index building). Subsequen
 Eagle Eye does **not** replace Hermes' built-in `<available_skills>` block in the system prompt. Both layers work together:
 
 - **Full skill index** remains in the system prompt as the safety net
-- **Eagle Eye L1** can auto-inject full SKILL.md content for obvious matches, saving a `skill_view()` round-trip
+- **Eagle Eye L1** injects skill content directly (capped at 4000 chars) for obvious matches, saving a `skill_view()` round-trip. L1 matches skip curator tracking — they're deterministic, not judgment calls
 - **Eagle Eye L2-5** surfaces semantically related skills the LLM might miss from the flat list
 - **No-match silence** stays out of the way when general knowledge is the right answer
 
