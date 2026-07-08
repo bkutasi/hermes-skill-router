@@ -11,7 +11,7 @@ from pathlib import Path
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
-from generate_config import discover_skills
+from generate_config import discover_skills, _extract_description
 
 # Common stop words to filter out
 STOP_WORDS = {
@@ -183,15 +183,15 @@ def main():
     print(f"Generated {len(triggers)} hard triggers")
     print(f"Generated synonyms for {len(synonyms)} skills")
 
-    out = Path("src")
+    out = Path(__file__).parent.parent / "src"
     write_triggers_py(triggers, out / "hard_triggers_generated.py")
     write_synonyms_yaml(synonyms, out / "skill_synonyms.yaml")
 
     print(f"\nWritten:")
     print(f"  src/hard_triggers_generated.py ({len(triggers)} triggers)")
     print(f"  src/skill_synonyms.yaml ({len(synonyms)} skills)")
-    print(f"\nNext: paste triggers into _HARD_TRIGGERS in skill_retriever.py")
-    print(f"      or use the generated file directly")
+    print(f"\nNext: the generated files are loaded automatically by skill_retriever.py")
+    print(f"      Run 'bash scripts/install.sh' to install them to Hermes")
 
 
 if __name__ == "__main__":

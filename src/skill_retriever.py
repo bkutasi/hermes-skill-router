@@ -13,13 +13,14 @@ Usage:
         hints = retriever.retrieve("help me debug this", top_k=5)
 """
 
+import importlib.util
 import logging
 import math
 import os
 import re
 import threading
 import time
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -28,7 +29,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# ── Configuration ──────────────────────────────────────────────
 _DISABLE_ENV = "HERMES_DISABLE_SKILL_RETRIEVAL"
 _TOP_K_ENV = "HERMES_SKILL_RETRIEVAL_TOP_K"
 
@@ -43,11 +43,14 @@ _MIN_RRF_SCORE = 0.003
 # Below this, the query likely doesn't match any skill well.
 _CONFIDENCE_THRESHOLD = 0.015  # Empirically determined — filters noise effectively
 
+# Module-level compiled regex patterns for hard trigger matching
+_CJK_RE = re.compile('[\u4e00-\u9fff]')
+_ASCII_RE = re.compile(r'[a-zA-Z]')
+
 _SINGLETON: "SkillRetriever | None" = None
 _SINGLETON_LOCK = threading.Lock()
 
-# ── Hard Triggers (Layer 1) ────────────────────────────────────
-# Maps exact substring → skill name. Order matters: first match wins.
+# Maps exact substring → skill name.
 # These bypass all ranking — if query contains the trigger, return directly.
 #
 # Triggers are auto-generated from your skill library by:
@@ -57,19 +60,24 @@ _HARD_TRIGGERS: list[tuple[str, str]] = [
     # ── Auto-generated (from build_real_config.py) ──
 ]
 
-# Load generated triggers at import time
-try:
-    from pathlib import Path as _Path
-    _triggers_file = _Path(__file__).parent / "hard_triggers_generated.py"
-    if _triggers_file.exists():
-        _generated: list[tuple[str, str]] = []
-        _ns: dict = {}
-        exec(compile(_triggers_file.read_text(encoding="utf-8"), str(_triggers_file), "exec"), _ns)
-        _generated = _ns.get("_HARD_TRIGGERS", [])
-        _HARD_TRIGGERS = _generated
-        logger.info("Loaded %d hard triggers from %s", len(_HARD_TRIGGERS), _triggers_file.name)
-except Exception as _e:
-    logger.warning("Failed to load generated triggers: %s", _e)
+# Load generated triggers at import time using importlib (not exec)
+_triggers_file = Path(__file__).parent / "hard_triggers_generated.py"
+if _triggers_file.exists():
+    try:
+        _spec = importlib.util.spec_from_file_location(
+            "hard_triggers_generated", _triggers_file
+        )
+        _mod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _generated = getattr(_mod, "_HARD_TRIGGERS", [])
+        if _generated:
+            _HARD_TRIGGERS = _generated
+            logger.info(
+                "Loaded %d hard triggers from %s",
+                len(_HARD_TRIGGERS), _triggers_file.name,
+            )
+    except Exception as _e:
+        logger.warning("Failed to load generated triggers: %s", _e)
 
 
 def _is_subsequence(chars: list[str], text: str, max_gap: int = 3) -> bool:
@@ -118,25 +126,36 @@ class SkillRetriever:
         self._synonyms: dict[str, list[str]] = {}       # skill → [syn, ...]
         self._synonym_index: dict[str, list[tuple[str, float]]] = {}  # token → [(skill, weight)]
         self._skill_paths: dict[str, Path] = {}          # skill_name → SKILL.md path
+        self._skill_name_to_idx: dict[str, int] = {}      # skill_name → list index (O(1) lookup)
         # Embedding (HTTP-based, no local model)
         self._emb_matrix = None
+        self._emb_ready = False          # embedding endpoint confirmed working
+        self._emb_error: str | None = None  # last embedding error, None if healthy
+        self._query_emb_cache: "OrderedDict[str, object]" = OrderedDict()
+        self._query_emb_cache_max = 256
+        self._last_init_attempt = 0.0  # monotonic timestamp of last _lazy_init call
         self._emb_base_url = ""
         self._emb_api_key = ""
         self._emb_model_name = "default"
         self._jieba_initialized = False
         self._top_k = int(os.environ.get(_TOP_K_ENV, "5"))
-        # Start background initialization immediately
-        threading.Thread(target=self._lazy_init, daemon=True).start()
 
+        # Check disable BEFORE spawning the background thread
         if os.environ.get(_DISABLE_ENV, "").lower() in ("1", "true", "yes"):
             logger.info("Skill retrieval disabled via %s", _DISABLE_ENV)
             return
+
+        # Start background initialization only if not disabled
+        threading.Thread(target=self._lazy_init, daemon=True).start()
 
     def is_ready(self) -> bool:
         return self._ready
 
     def is_loading(self) -> bool:
         return self._loading
+    def is_embedding_ready(self) -> bool:
+        """True only if L4 embedding is operational."""
+        return self._emb_ready
 
     def error(self) -> str | None:
         return self._error
@@ -163,6 +182,10 @@ class SkillRetriever:
         if not query or not query.strip():
             return {"skills": [], "layer": "none"}
 
+        # Disabled check — must be before L1 to prevent any processing
+        if os.environ.get(_DISABLE_ENV, "").lower() in ("1", "true", "yes"):
+            return {"skills": [], "layer": "none"}
+
         # ── Layer 1: Hard triggers (instant return, no ranking) ──
         hard_hit = self._hard_trigger(query)
         if hard_hit:
@@ -171,16 +194,21 @@ class SkillRetriever:
 
         # ── Layers 2-5: Full retrieval pipeline ──
         if not self._ready:
-            if not self._loading:
-                logger.info("Skill retriever: initializing on first call...")
-                self._lazy_init()
-            else:
-                # Wait up to 120s for background init (embedding 230 skills
-                # via HTTP takes ~60s)
-                for _ in range(1200):
-                    if not self._loading:
-                        break
-                    time.sleep(0.1)
+            if self._loading:
+                logger.debug("Skill retriever still loading, skipping query")
+                return {"skills": [], "layer": "none"}
+            # Not loading and not ready — init failed or hasn't started.
+            # Retry with backoff: only if ≥30s since the last attempt.
+            # First call (last_attempt == 0) always retries.
+            now = time.monotonic()
+            if now - self._last_init_attempt < 30.0:
+                logger.debug(
+                    "Skill retriever not ready, backing off (%.1fs since last attempt)",
+                    now - self._last_init_attempt,
+                )
+                return {"skills": [], "layer": "none"}
+            logger.info("Skill retriever: retrying init (not ready)")
+            self._lazy_init()
             if not self._ready:
                 logger.warning("Skill retriever not ready after init attempt")
                 return {"skills": [], "layer": "none"}
@@ -189,7 +217,11 @@ class SkillRetriever:
         try:
             result = self._retrieve_inner(query, k)
             if result:
-                logger.info("Skill retriever: %d skills for [%s]", len(result), query[:50])
+                layer_count = 3 if self._emb_ready else 2
+                logger.info(
+                    "Skill retriever L2-5: %d skills (%d/3 layers) for [%s]",
+                    len(result), layer_count, query[:50],
+                )
             return {"skills": result, "layer": "L2-5" if result else "none"}
         except Exception as e:
             logger.warning("Skill retrieval failed: %s", e)
@@ -197,41 +229,21 @@ class SkillRetriever:
 
     def get_skill_content(self, skill_name: str) -> str | None:
         """Read and return the full SKILL.md content for a skill."""
-        # Try cached path first
         path = self._skill_paths.get(skill_name)
         if path and path.exists():
             try:
                 return path.read_text(encoding="utf-8")
             except Exception:
                 pass
-
-        # Fallback: search skills directories directly
-        from hermes_constants import get_hermes_home
-
-        for base_dir in [
-            get_hermes_home() / "skills",
-            get_hermes_home() / "hermes-agent" / "skills",
-        ]:
-            if not base_dir.exists():
-                continue
-            # Pattern 1: skills/<skill_name>/SKILL.md (flat structure)
-            direct = base_dir / skill_name / "SKILL.md"
-            if direct.exists():
-                try:
-                    return direct.read_text(encoding="utf-8")
-                except Exception:
-                    pass
-            # Pattern 2: skills/<category>/<skill_name>/SKILL.md (nested)
-            for cat_dir in base_dir.iterdir():
-                if not cat_dir.is_dir():
-                    continue
-                skill_md = cat_dir / skill_name / "SKILL.md"
-                if skill_md.exists():
-                    try:
-                        return skill_md.read_text(encoding="utf-8")
-                    except Exception:
-                        pass
+        logger.warning("Skill content not found for %s (not in cache)", skill_name)
         return None
+
+    def get_skill_desc(self, skill_name: str) -> str:
+        """Return the description for a skill, or empty string if unknown."""
+        idx = self._skill_name_to_idx.get(skill_name)
+        if idx is not None and idx < len(self._skill_descs):
+            return self._skill_descs[idx]
+        return ""
 
     @staticmethod
     def _hard_trigger(query: str) -> str | None:
@@ -243,6 +255,8 @@ class SkillRetriever:
         Tier 2: Subsequence match — trigger CJK chars appear in order in query
                  with max 3-char gap between consecutive matched chars.
         Tier 3: Regex fuzzy — trigger segments with optional gaps (0-3 chars)
+
+        All tiers collect ALL matches and pick the longest trigger.
         """
         q = query.strip()
         if not q:
@@ -263,20 +277,20 @@ class SkillRetriever:
         # Tier 2+3: Only for triggers with 2+ CJK characters
         #           and NO ASCII letters (ASCII-containing triggers like
         #           "Python数据" are too ambiguous for fuzzy matching)
-        cjk_pattern = re.compile('[\u4e00-\u9fff]')
-        ascii_pattern = re.compile(r'[a-zA-Z]')
+        fuzzy_matches: list[tuple[str, str]] = []  # (trigger, skill)
         for trigger, skill in _HARD_TRIGGERS:
-            cjk_chars = cjk_pattern.findall(trigger)
+            cjk_chars = _CJK_RE.findall(trigger)
             if len(cjk_chars) < 2:
                 continue
             # Skip fuzzy matching for mixed CJK/ASCII triggers
-            if ascii_pattern.search(trigger):
+            if _ASCII_RE.search(trigger):
                 continue
 
             # Tier 2: Subsequence — all CJK chars of trigger appear in order
             if _is_subsequence(cjk_chars, q, max_gap=3):
                 logger.debug("L1 subsequence match: %r in %r → %s", trigger, q, skill)
-                return skill
+                fuzzy_matches.append((trigger, skill))
+                continue
 
             # Tier 3: Regex fuzzy — insert .{0,3} between trigger segments
             segments = re.findall('[\u4e00-\u9fff]+', trigger)
@@ -285,19 +299,27 @@ class SkillRetriever:
                 try:
                     if re.search(pattern, q):
                         logger.debug("L1 regex fuzzy match: %r ~ %r → %s", pattern, q, skill)
-                        return skill
+                        fuzzy_matches.append((trigger, skill))
                 except re.error:
                     pass
 
+        if fuzzy_matches:
+            # Longest trigger wins, same as Tier 1
+            fuzzy_matches.sort(key=lambda x: -len(x[0]))
+            return fuzzy_matches[0][1]
+
         return None
 
-    # ── Initialization ──────────────────────────────────────────
 
     def _lazy_init(self) -> None:
         self._loading = True
+        self._last_init_attempt = time.monotonic()
         try:
             t0 = time.time()
             self._load_skills()
+            self._skill_name_to_idx = {
+                name: i for i, name in enumerate(self._skill_names)
+            }
             self._load_synonyms()
             self._build_fts5_index()
             self._load_embedding_model()
@@ -324,10 +346,10 @@ class SkillRetriever:
         for base_dir in [skills_dir, hermes_agent_skills]:
             if not base_dir.exists():
                 continue
-            self._scan_skill_dir(base_dir, seen, parent="")
+            self._scan_skill_dir(base_dir, seen)
 
     def _scan_skill_dir(
-        self, base_dir: Path, seen: set[str], parent: str = ""
+        self, base_dir: Path, seen: set[str]
     ) -> None:
         """Recursively scan for SKILL.md files — handles flat and nested layouts.
 
@@ -359,7 +381,7 @@ class SkillRetriever:
                     if sub.is_dir()
                 )
                 if has_skill_md:
-                    self._scan_skill_dir(entry, seen, parent=entry.name)
+                    self._scan_skill_dir(entry, seen)
 
     @staticmethod
     def _extract_description(content: str) -> str:
@@ -376,6 +398,7 @@ class SkillRetriever:
     def _load_synonyms(self) -> None:
         """Load synonym dictionary — Layer 3 source data."""
         import jieba
+        import yaml
 
         synonym_file = Path(__file__).parent / "skill_synonyms.yaml"
         if not synonym_file.exists():
@@ -384,22 +407,16 @@ class SkillRetriever:
 
         try:
             content = synonym_file.read_text(encoding="utf-8")
-            current_skill = None
-            for line in content.split("\n"):
-                stripped = line.strip()
-                if not stripped or stripped.startswith("#"):
+            data = yaml.safe_load(content)
+            if not isinstance(data, dict):
+                return
+
+            for skill_name, syns in data.items():
+                if not isinstance(syns, list):
                     continue
-                if stripped.startswith("- "):
-                    if current_skill:
-                        synonym = stripped[2:].strip().strip('"').strip("'")
-                        if synonym:
-                            self._synonyms.setdefault(current_skill, []).append(synonym)
-                elif ":" in stripped and not stripped.startswith("-"):
-                    skill_name = stripped.split(":")[0].strip()
-                    if skill_name and not skill_name.startswith("_"):
-                        current_skill = skill_name
-                    else:
-                        current_skill = None
+                for syn in syns:
+                    if isinstance(syn, str) and syn.strip():
+                        self._synonyms.setdefault(skill_name, []).append(syn.strip())
 
             # Build reverse index for Layer 3
             valid_names = set(self._skill_names)
@@ -471,6 +488,7 @@ class SkillRetriever:
           HERMES_EMBEDDING_BASE_URL  (default: http://localhost:8080/v1)
           HERMES_EMBEDDING_MODEL     (default: default — llama.cpp ignores it)
           HERMES_EMBEDDING_API_KEY   (default: not-required)
+          HERMES_EMBEDDING_BATCH_SIZE (default: 16)
         """
         try:
             import numpy as np
@@ -478,6 +496,7 @@ class SkillRetriever:
         except ImportError:
             logger.warning("numpy/requests not installed; FTS5+Syn only")
             self._emb_matrix = None
+            self._emb_error = "numpy/requests not installed"
             return
 
         base_url = os.environ.get(
@@ -486,6 +505,7 @@ class SkillRetriever:
         )
         api_key = os.environ.get("HERMES_EMBEDDING_API_KEY", "")
         model_name = os.environ.get("HERMES_EMBEDDING_MODEL", "default")
+        batch_size = int(os.environ.get("HERMES_EMBEDDING_BATCH_SIZE", "16"))
 
         self._emb_base_url = base_url
         self._emb_api_key = api_key
@@ -514,6 +534,8 @@ class SkillRetriever:
                         self._emb_matrix.shape,
                         self._emb_matrix.nbytes / 1e6,
                     )
+                    self._emb_ready = True
+                    self._emb_error = None
                     return
                 else:
                     logger.info("Embedding cache miss: skill set changed, re-embedding")
@@ -527,7 +549,6 @@ class SkillRetriever:
                 headers["Authorization"] = f"Bearer {api_key}"
 
             all_embeddings: list[list[float]] = []
-            batch_size = 16
             for i in range(0, len(texts), batch_size):
                 batch = texts[i:i + batch_size]
                 resp = requests.post(
@@ -564,11 +585,13 @@ class SkillRetriever:
                 "Embedding model loaded via HTTP: %s, shape: %s",
                 base_url, self._emb_matrix.shape,
             )
+            self._emb_ready = True
+            self._emb_error = None
         except Exception as e:
             logger.warning("Embedding model load failed (%s); FTS5+Syn only", e)
             self._emb_matrix = None
+            self._emb_error = str(e)
 
-    # ── Retrieval Pipeline ──────────────────────────────────────
 
     def _retrieve_inner(self, query: str, k: int) -> list[str]:
         """Layers 2-5: FTS5 + Synonym + Embedding → RRF fusion.
@@ -642,38 +665,36 @@ class SkillRetriever:
             if qt in self._synonym_index:
                 q_idf = self._idf.get(qt, 1.0)
                 for skill_name, weight in self._synonym_index[qt]:
-                    try:
-                        idx = self._skill_names.index(skill_name)
+                    idx = self._skill_name_to_idx.get(skill_name)
+                    if idx is not None:
                         scores[idx] += weight * q_idf
-                    except ValueError:
-                        pass
 
         # Full-phrase synonym matching (multi-char synonyms in query)
         for syn_key, entries in self._synonym_index.items():
             if len(syn_key) > 2 and syn_key in query:
                 for skill_name, weight in entries:
-                    try:
-                        idx = self._skill_names.index(skill_name)
+                    idx = self._skill_name_to_idx.get(skill_name)
+                    if idx is not None:
                         scores[idx] += weight * 2.0
-                    except ValueError:
-                        pass
 
         ranked = sorted(scores.items(), key=lambda x: -x[1])
         return ranked[:k]
 
-    def _emb_search(self, query: str, k: int) -> list[tuple[int, float]]:
-        """Layer 4: Dense embedding cosine similarity via HTTP endpoint."""
+    def _embed_query(self, query: str):
+        """Embed a single query via HTTP, cached by exact query string (LRU, 256 entries)."""
         if self._emb_matrix is None:
-            return []
-
+            return None
+        # Cache hit
+        if query in self._query_emb_cache:
+            self._query_emb_cache.move_to_end(query)
+            return self._query_emb_cache[query]
+        # Cache miss: fetch via HTTP
         import numpy as np
         import requests
-
         try:
             headers = {"Content-Type": "application/json"}
-            if getattr(self, "_emb_api_key", ""):
+            if self._emb_api_key:
                 headers["Authorization"] = f"Bearer {self._emb_api_key}"
-
             resp = requests.post(
                 f"{self._emb_base_url}/embeddings",
                 headers=headers,
@@ -682,14 +703,26 @@ class SkillRetriever:
             )
             resp.raise_for_status()
             query_emb = np.array(resp.json()["data"][0]["embedding"], dtype=np.float32)
-            # Normalize
             norm = np.linalg.norm(query_emb)
             if norm > 0:
                 query_emb = query_emb / norm
         except Exception as e:
             logger.debug("Embedding query failed: %s", e)
-            return []
+            return None
+        # Store in cache
+        self._query_emb_cache[query] = query_emb
+        if len(self._query_emb_cache) > self._query_emb_cache_max:
+            self._query_emb_cache.popitem(last=False)
+        return query_emb
 
+    def _emb_search(self, query: str, k: int) -> list[tuple[int, float]]:
+        """Layer 4: Dense embedding cosine similarity via HTTP endpoint."""
+        if self._emb_matrix is None:
+            return []
+        import numpy as np
+        query_emb = self._embed_query(query)
+        if query_emb is None:
+            return []
         scores = np.dot(self._emb_matrix, query_emb.T).flatten()
         top_idx = np.argsort(-scores)[:k]
         return [(int(idx), float(scores[idx])) for idx in top_idx]

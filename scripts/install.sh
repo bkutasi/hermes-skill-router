@@ -3,21 +3,35 @@
 set -e
 
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-PLUGIN_DIR="$HERMES_HOME/hermes-agent/plugins/eagle-eye"
-AGENT_DIR="$HERMES_HOME/hermes-agent/agent"
+PLUGIN_DIR="$HERMES_HOME/plugins/eagle-eye"
+
 SRC_DIR="$(dirname "$0")/../src"
 
 echo "🦅 Installing Eagle Eye skill retriever..."
 
-# 1. Copy retrieval engine to agent/
-cp "$SRC_DIR/skill_retriever.py" "$AGENT_DIR/"
-
-# 2. Create plugin directory and copy plugin + manifest
+# 1. Create plugin directory and copy retrieval engine + config files
 mkdir -p "$PLUGIN_DIR"
+cp "$SRC_DIR/skill_retriever.py" "$PLUGIN_DIR/"
+
+# 2. Copy generated config files if they exist (gitignored, user-specific)
+if [ -f "$SRC_DIR/hard_triggers_generated.py" ]; then
+    cp "$SRC_DIR/hard_triggers_generated.py" "$PLUGIN_DIR/"
+    echo "  ✅ Copied hard_triggers_generated.py"
+else
+    echo "  ⚠️  hard_triggers_generated.py not found — run 'python scripts/build_real_config.py' first"
+fi
+if [ -f "$SRC_DIR/skill_synonyms.yaml" ]; then
+    cp "$SRC_DIR/skill_synonyms.yaml" "$PLUGIN_DIR/"
+    echo "  ✅ Copied skill_synonyms.yaml"
+else
+    echo "  ⚠️  skill_synonyms.yaml not found — run 'python scripts/build_real_config.py' first"
+fi
+
+# 3. Copy plugin entry point and manifest
 cp "$SRC_DIR/plugin.py" "$PLUGIN_DIR/__init__.py"
 cp "$SRC_DIR/plugin.yaml" "$PLUGIN_DIR/plugin.yaml"
 
-# 3. Enable plugin in config (if not already)
+# 4. Enable plugin in config (if not already)
 CONFIG="$HERMES_HOME/config.yaml"
 if ! grep -q "eagle-eye" "$CONFIG" 2>/dev/null; then
     python3 -c "
@@ -38,7 +52,7 @@ else
     echo "  ℹ️  Plugin already enabled in config.yaml"
 fi
 
-# 4. Install dependencies
+# 5. Install dependencies
 echo ""
 echo "Checking dependencies..."
 VENV_PIP="$HERMES_HOME/hermes-agent/venv/bin/pip"

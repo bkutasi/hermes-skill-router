@@ -4,12 +4,14 @@ Wires one behaviour:
 
 * ``pre_llm_call`` hook — runs the skill retriever on each user query.
 
-  **L1 hard trigger hit**: Injects the full SKILL.md content directly into
-  the user message. The LLM gets the skill immediately — no decision needed,
-  no extra tool call.
+  **L1 hard trigger hit**: Injects skill content directly into context
+  (capped at 4000 chars). No ``skill_view()`` round-trip needed. L1
+  matches skip curator tracking — they're deterministic keyword matches,
+  not judgment calls the curator needs to rank.
 
-  **L2-5 pipeline hit**: Injects top skill names as lightweight hints.
-  The LLM decides whether to load them via skill_view() or ignore them.
+  **L2-5 pipeline hit**: Injects top skill names with descriptions as
+  lightweight hints. The LLM decides whether to load them via
+  ``skill_view()`` or ignore them.
 
   **No match**: Returns nothing. LLM uses general knowledge.
 
@@ -24,25 +26,42 @@ Disable via: ``HERMES_DISABLE_SKILL_RETRIEVAL=1``
 from __future__ import annotations
 
 import logging
-import os
 
 logger = logging.getLogger(__name__)
-
-_DISABLE_ENV = "HERMES_DISABLE_SKILL_RETRIEVAL"
-
-# Max skill content chars to inject (prevent token overflow)
-_MAX_CONTENT_CHARS = 8000
 
 
 def _on_pre_llm_call(*, user_message: str = "", **_kwargs) -> dict | None:
     """Run skill retrieval and inject result into user message."""
-    if os.environ.get(_DISABLE_ENV, "").lower() in ("1", "true", "yes"):
-        return None
     if not user_message or not user_message.strip():
         return None
 
+    # Skip system-injected messages — not real user queries
+    _NOISE_PATTERNS = (
+        "[ASYNC DELEGATION",
+        "Review the conversation above",
+        "[System",
+        "[Balázs",  # Telegram sender prefix
+    )
+    stripped = user_message.strip()
+    for pattern in _NOISE_PATTERNS:
+        if stripped.startswith(pattern):
+            return None
+
+    # Strip [Replying to: "..."] prefix — the real query follows the ]
+    if stripped.startswith("[Replying to:"):
+        bracket_end = stripped.find('"]', 14)  # skip opening [Replying to: "
+        if bracket_end != -1 and bracket_end + 2 < len(stripped):
+            user_message = stripped[bracket_end + 2:].strip()
+        else:
+            return None  # Reply prefix with no actual message
+    else:
+        user_message = stripped
+
+    if not user_message:
+        return None
+
     try:
-        from agent.skill_retriever import get_skill_retriever
+        from .skill_retriever import get_skill_retriever
 
         retriever = get_skill_retriever()
         result = retriever.retrieve_detailed(user_message)
@@ -54,45 +73,68 @@ def _on_pre_llm_call(*, user_message: str = "", **_kwargs) -> dict | None:
             return None
 
         if layer == "L1":
-            # ── L1: Inject full SKILL.md content directly ──
+            # ── L1: Direct content injection — no skill_view() round-trip ──
+            #  Inject the skill content directly. L1 hard triggers are
+            #  deterministic keyword matches, so we skip skill_usage tracking.
             skill_name = result.get("skill_name", skills[0])
-            content = retriever.get_skill_content(skill_name)
+            content = retriever.get_skill_content(skill_name) or ""
 
-            if content:
-                # Truncate if too long
-                if len(content) > _MAX_CONTENT_CHARS:
-                    content = content[:_MAX_CONTENT_CHARS] + "\n\n[... truncated ...]"
+            # Cap injected content — full SKILL.md can be 100K+ chars
+            _L1_CAP = 4000
+            truncated = len(content) > _L1_CAP
+            body = content[:_L1_CAP] if truncated else content
 
-                injection = (
-                    f"## Auto-loaded Skill: {skill_name}\n"
-                    f"[System note: This skill was automatically matched "
-                    f"via hard trigger. Use its instructions directly.]\n\n"
-                    f"{content}"
-                )
+            truncation_note = ""
+            if truncated:
+                truncation_note = f' Truncated — call skill_view("{skill_name}") for full content.'
 
-                logger.info(
-                    "Skill retriever L1: injected %s (%d chars)",
-                    skill_name, len(content),
-                )
-                return {"context": injection}
+            hint = (
+                f"## Skill Routing (Hard Trigger: {skill_name})\n"
+                f'[System: The skill "{skill_name}" was matched with 100% confidence. '
+                f"Its content is injected below.{truncation_note}]\n\n"
+                f"---\n{body}\n---\n"
+            )
 
-        # ── L2-5: Inject lightweight hint ──
+            logger.info(
+                "Skill retriever L1: direct injection of %s (%d chars%s)",
+                skill_name, len(body),
+                ", truncated" if truncated else "",
+            )
+            return {"context": hint}
+
+        # ── L2-5: Inject hint with descriptions ──
+        # When embedding layer is down, note degraded mode so the LLM
+        # knows semantic matching is unavailable (FTS5+Synonyms only).
+        degraded = not retriever.is_embedding_ready()
+        header = "## Skill Retrieval Hint"
+        if degraded:
+            header += " (Degraded: semantic search unavailable)"
+
+        lines = []
+        for name in skills:
+            desc = retriever.get_skill_desc(name)
+            if desc:
+                lines.append(f"- **{name}** — {desc}")
+            else:
+                lines.append(f"- **{name}**")
+
         hint = (
-            "## Skill Retrieval Hint\n"
+            header + "\n"
             "[System note: The following skills may be relevant to this query. "
             "Use your judgment — load via skill_view() if useful, "
             "or ignore and answer directly if none fit.]\n\n"
-            + "\n".join(f"- {name}" for name in skills)
+            + "\n".join(lines)
         )
 
         logger.info(
-            "Skill retriever L2-5: %d skills hinted for query: %s",
+            "Skill retriever L2-5: %d skills hinted for query: %s%s",
             len(skills), user_message[:50],
+            " [DEGRADED: embedding down]" if degraded else "",
         )
         return {"context": hint}
 
     except Exception as e:
-        logger.debug("Skill retriever hook failed (non-fatal): %s", e)
+        logger.warning("Skill retriever hook failed (non-fatal): %s", e)
         return None
 
 
@@ -100,3 +142,17 @@ def register(ctx) -> None:
     """Register the pre_llm_call hook with Hermes plugin system."""
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     logger.info("eagle-eye plugin registered (pre_llm_call hook)")
+    # Log embedding health at startup so degraded mode is visible
+    try:
+        from .skill_retriever import get_skill_retriever
+        retriever = get_skill_retriever()
+        if retriever.is_embedding_ready():
+            logger.info("eagle-eye: embedding layer operational (L4 active)")
+        else:
+            logger.warning(
+                "eagle-eye: embedding layer NOT ready — degraded mode (L2-3 only). "
+                "Error: %s",
+                retriever._emb_error or "init pending",
+            )
+    except Exception as e:
+        logger.warning("eagle-eye: could not check embedding health: %s", e)
