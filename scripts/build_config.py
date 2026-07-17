@@ -65,16 +65,35 @@ def _discover_from_dir(base_dir: Path, skills: list[dict], seen: set[str]) -> No
         skill_md = entry / "SKILL.md"
         if skill_md.exists():
             name = entry.name
-            if name in seen:
-                continue
-            content = skill_md.read_text(encoding="utf-8")
-            seen.add(name)
-            skills.append({
-                "name": name,
-                "category": base_dir.name,
-                "description": _extract_description(content),
-                "path": str(skill_md),
-            })
+            if name not in seen:
+                content = skill_md.read_text(encoding="utf-8")
+                seen.add(name)
+                skills.append({
+                    "name": name,
+                    "category": base_dir.name,
+                    "description": _extract_description(content),
+                    "path": str(skill_md),
+                })
+            # Nested packages under parent skill (keep in sync with skill_retriever)
+            try:
+                for sub in sorted(entry.iterdir()):
+                    if (
+                        sub.is_dir()
+                        and not sub.name.startswith(".")
+                        and (sub / "SKILL.md").exists()
+                        and sub.name not in seen
+                    ):
+                        sm = sub / "SKILL.md"
+                        content = sm.read_text(encoding="utf-8")
+                        seen.add(sub.name)
+                        skills.append({
+                            "name": sub.name,
+                            "category": entry.name,
+                            "description": _extract_description(content),
+                            "path": str(sm),
+                        })
+            except OSError:
+                pass
         else:
             try:
                 has_skill_md = any(

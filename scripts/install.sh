@@ -31,33 +31,39 @@ fi
 cp "$SRC_DIR/plugin.py" "$PLUGIN_DIR/__init__.py"
 cp "$SRC_DIR/plugin.yaml" "$PLUGIN_DIR/plugin.yaml"
 
-# 4. Enable plugin (skip if already listed — avoid interactive hermes prompts)
-if grep -q "eagle-eye" "$HERMES_HOME/config.yaml" 2>/dev/null; then
-    echo "  ℹ️  Plugin already present in config.yaml"
+# 4. Enable plugin (only plugins.enabled — not plugins.entries.*)
+if python3 -c "
+import yaml
+from pathlib import Path
+p = Path('$HERMES_HOME/config.yaml')
+c = yaml.safe_load(p.read_text()) if p.exists() else {}
+en = (c or {}).get('plugins') or {}
+enabled = en.get('enabled') or []
+raise SystemExit(0 if 'eagle-eye' in enabled else 1)
+" 2>/dev/null; then
+    echo "  ℹ️  Plugin already in plugins.enabled"
 elif hermes plugins enable eagle-eye </dev/null 2>/dev/null; then
     echo "  ✅ Plugin enabled via hermes plugins enable"
 else
     # last resort: append only (no yaml.dump thrash)
     python3 -c "
+import yaml
 from pathlib import Path
 p = Path('$HERMES_HOME/config.yaml')
-text = p.read_text(encoding='utf-8') if p.exists() else ''
-if 'eagle-eye' not in text:
-    if 'plugins:' not in text:
-        text = text.rstrip() + '\n\nplugins:\n  enabled:\n    - eagle-eye\n'
-        p.write_text(text, encoding='utf-8')
-    elif 'enabled:' in text:
-        lines = text.splitlines(True)
-        out = []
-        for line in lines:
-            out.append(line)
-            if line.strip() == 'enabled:' or line.rstrip().endswith('enabled:'):
-                indent = '    ' if line.startswith(' ') else '  '
-                out.append(f'{indent}- eagle-eye\n')
-        p.write_text(''.join(out), encoding='utf-8')
-    else:
-        text = text.rstrip() + '\n  enabled:\n    - eagle-eye\n'
-        p.write_text(text, encoding='utf-8')
+c = yaml.safe_load(p.read_text()) if p.exists() else {} or {}
+if not isinstance(c, dict):
+    c = {}
+plugins = c.setdefault('plugins', {})
+if not isinstance(plugins, dict):
+    plugins = {}
+    c['plugins'] = plugins
+enabled = plugins.setdefault('enabled', [])
+if not isinstance(enabled, list):
+    enabled = []
+    plugins['enabled'] = enabled
+if 'eagle-eye' not in enabled:
+    enabled.append('eagle-eye')
+    p.write_text(yaml.safe_dump(c, sort_keys=False, allow_unicode=True), encoding='utf-8')
 print('enabled')
 "
     echo "  ✅ Plugin enable attempted (append)"

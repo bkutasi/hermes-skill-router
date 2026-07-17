@@ -322,6 +322,17 @@ class TestRetrieveDetailed:
         assert result["layer"] == "none"
 
 
+    def test_l1_skipped_until_ready(self, monkeypatch):
+        """L1 must not fire before init filtered live skill set."""
+        import skill_retriever as sr_mod
+        monkeypatch.setattr(sr_mod, "_HARD_TRIGGERS", [("debug", "debugging-skill")])
+        r = SkillRetriever()
+        r._ready = False
+        r._loading = True
+        result = r.retrieve_detailed("please debug this")
+        assert result["layer"] != "L1"
+
+
 # ── Embedding health state tests ──────────────────────────
 
 
@@ -492,6 +503,24 @@ class TestScanSkillDir:
         assert r._skill_names == ["live-skill"]
         assert "dead-skill" not in r._skill_names
         assert "hub-skill" not in r._skill_names
+
+    def test_indexes_nested_skill_under_parent(self, tmp_path, monkeypatch):
+        """Parent SKILL.md does not hide nested package skills."""
+        monkeypatch.setenv("HERMES_DISABLE_SKILL_RETRIEVAL", "1")
+        skills = tmp_path / "skills"
+        parent = skills / "telegram-formatting"
+        parent.mkdir(parents=True)
+        (parent / "SKILL.md").write_text("---\ndescription: parent\n---\n", encoding="utf-8")
+        nested = parent / "telegram-media-delivery"
+        nested.mkdir()
+        (nested / "SKILL.md").write_text("---\ndescription: nested\n---\n", encoding="utf-8")
+        r = SkillRetriever()
+        r._skill_names = []
+        r._skill_descs = []
+        r._skill_paths = {}
+        r._scan_skill_dir(skills, set())
+        assert "telegram-formatting" in r._skill_names
+        assert "telegram-media-delivery" in r._skill_names
 
 
 class TestTriggerFilter:

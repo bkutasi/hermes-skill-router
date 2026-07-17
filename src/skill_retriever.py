@@ -186,11 +186,13 @@ class SkillRetriever:
         if os.environ.get(_DISABLE_ENV, "").lower() in ("1", "true", "yes"):
             return {"skills": [], "layer": "none"}
 
-        # ── Layer 1: Hard triggers (instant return, no ranking) ──
-        hard_hit = self._hard_trigger(query)
-        if hard_hit:
-            logger.info("Skill retriever L1 hard trigger → %s", hard_hit)
-            return {"skills": [hard_hit], "layer": "L1", "skill_name": hard_hit}
+        # ── Layer 1: only after init filtered live triggers/paths ──
+        # (import-time _HARD_TRIGGERS may still name archived skills)
+        if self._ready:
+            hard_hit = self._hard_trigger(query)
+            if hard_hit:
+                logger.info("Skill retriever L1 hard trigger → %s", hard_hit)
+                return {"skills": [hard_hit], "layer": "L1", "skill_name": hard_hit}
 
         # ── Layers 2-5: Full retrieval pipeline ──
         if not self._ready:
@@ -406,16 +408,37 @@ class SkillRetriever:
             skill_md = entry / "SKILL.md"
             if skill_md.exists():
                 name = entry.name
-                if name in seen:
-                    continue
+                if name not in seen:
+                    try:
+                        content = skill_md.read_text(encoding="utf-8")
+                        desc = self._extract_description(content)
+                        seen.add(name)
+                        self._skill_names.append(name)
+                        self._skill_descs.append(desc)
+                        self._skill_paths[name] = skill_md
+                    except Exception:
+                        pass
+                # Nested skill packages under a parent skill dir
+                # (e.g. telegram-formatting/telegram-media-delivery/)
                 try:
-                    content = skill_md.read_text(encoding="utf-8")
-                    desc = self._extract_description(content)
-                    seen.add(name)
-                    self._skill_names.append(name)
-                    self._skill_descs.append(desc)
-                    self._skill_paths[name] = skill_md
-                except Exception:
+                    for sub in sorted(entry.iterdir()):
+                        if (
+                            sub.is_dir()
+                            and not sub.name.startswith(".")
+                            and (sub / "SKILL.md").exists()
+                            and sub.name not in seen
+                        ):
+                            try:
+                                sm = sub / "SKILL.md"
+                                content = sm.read_text(encoding="utf-8")
+                                desc = self._extract_description(content)
+                                seen.add(sub.name)
+                                self._skill_names.append(sub.name)
+                                self._skill_descs.append(desc)
+                                self._skill_paths[sub.name] = sm
+                            except Exception:
+                                pass
+                except OSError:
                     pass
             else:
                 # Category directory — recurse (skip hidden children)
