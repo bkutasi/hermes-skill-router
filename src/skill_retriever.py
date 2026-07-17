@@ -2,9 +2,9 @@
 
 
 Layer 1: Hard triggers — exact keyword → direct return (100% deterministic)
-Layer 2: FTS5 BM25 — clean text search (name + description only)
+Layer 2: BM25 — clean text search (name + description only)
 Layer 3: Synonym dictionary — independent bonus scoring layer
-Layer 4: Dense Embedding — sentence-transformers cosine similarity
+Layer 4: Dense Embedding — HTTP cosine similarity
 Layer 5: RRF fusion — combine layers 2-4, return top-k
 
 Usage:
@@ -35,7 +35,7 @@ _TOP_K_ENV = "HERMES_SKILL_RETRIEVAL_TOP_K"
 
 # RRF parameters
 _RRF_K = 60
-_RRF_W_FTS5 = 0.45      # FTS5 text matching
+_RRF_W_FTS5 = 0.45      # BM25 text matching
 _RRF_W_SYN = 0.35       # Synonym dictionary
 _RRF_W_EMB = 0.20       # Dense embedding
 # Minimum RRF score to include (filters noise)
@@ -113,7 +113,7 @@ def get_skill_retriever() -> "SkillRetriever":
 
 
 class SkillRetriever:
-    """5-layer skill retrieval: Hard Trigger → FTS5 → Synonym → Embedding → RRF."""
+    """5-layer skill retrieval: Hard Trigger → BM25 → Synonym → Embedding → RRF."""
 
     def __init__(self) -> None:
         self._ready = False
@@ -604,7 +604,7 @@ class SkillRetriever:
             logger.warning("Failed to load synonym dictionary: %s", e)
 
     def _build_fts5_index(self) -> None:
-        """Layer 2: Build clean FTS5 index (name + description only)."""
+        """Layer 2: Build BM25 index (name + description only)."""
         import jieba
 
         if not self._jieba_initialized:
@@ -642,7 +642,7 @@ class SkillRetriever:
         """Layer 4: Load dense embedding model.
 
         Uses an OpenAI-compatible HTTP embedding endpoint (e.g. llama.cpp
-        with jina-embeddings-v5) instead of sentence-transformers.  This
+        with jina-embeddings-v5) instead of a local embedding model.  This
         avoids pulling PyTorch into the Hermes venv and lets you serve
         embeddings from a dedicated model server.
 
@@ -661,7 +661,7 @@ class SkillRetriever:
             import numpy as np
             import requests
         except ImportError:
-            logger.warning("numpy/requests not installed; FTS5+Syn only")
+            logger.warning("numpy/requests not installed; BM25+Syn only")
             self._emb_matrix = None
             self._emb_error = "numpy/requests not installed"
             return
@@ -869,7 +869,7 @@ class SkillRetriever:
             self._emb_ready = True
             self._emb_error = None
         except Exception as e:
-            logger.warning("Embedding model load failed (%s); FTS5+Syn only", e)
+            logger.warning("Embedding model load failed (%s); BM25+Syn only", e)
             self._emb_matrix = None
             self._emb_error = str(e)
         finally:
@@ -883,7 +883,7 @@ class SkillRetriever:
 
 
     def _retrieve_inner(self, query: str, k: int) -> list[str]:
-        """Layers 2-5: FTS5 + Synonym + Embedding → RRF fusion.
+        """Layers 2-5: BM25 + Synonym + Embedding → RRF fusion.
 
         Returns empty list when confidence is too low — meaning the query
         doesn't match any skill well, and the LLM should use general knowledge.

@@ -122,7 +122,7 @@ def _on_pre_llm_call(*, user_message: str = "", **_kwargs) -> dict | None:
 
         # ── L2-5: Inject hint with descriptions ──
         # When embedding layer is down, note degraded mode so the LLM
-        # knows semantic matching is unavailable (FTS5+Synonyms only).
+        # knows semantic matching is unavailable (BM25+Synonyms only).
         degraded = not retriever.is_embedding_ready()
         header = "## Skill Retrieval Hint"
         if degraded:

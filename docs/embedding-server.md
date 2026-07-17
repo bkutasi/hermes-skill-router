@@ -62,14 +62,14 @@ Environment variables (read by `skill_retriever.py`):
 
 ## Cache
 
-Embeddings are cached to `~/.hermes/.eagle_eye_emb_cache.npz`.
+| File | Role |
+|------|------|
+| `~/.hermes/.eagle_eye_emb_cache.npz` | Dense matrix; per-skill text hash row reuse |
+| `~/.hermes/.eagle_eye_text_index.npz` | Synonyms + BM25 tokens (no jieba rebuild on HIT) |
 
-Cache key = SHA256 of skill names + descriptions + base_url + model_name. Invalidated when:
-- Skills are added/removed/edited
-- The embedding endpoint URL or model changes
+Emb key includes names, descriptions, `base_url`, model. Text-index key includes names, descriptions, synonym file mtime/size.
 
-First run: 236 skills × 1024 dims = 1.0 MB, ~71s via HTTP.
-Cache hit: loads instantly from disk, no HTTP calls.
+Cold: HTTP embed + jieba once. Later process starts: both HIT → ready in tens of ms.
 
 ## Verification
 
@@ -84,5 +84,5 @@ curl -X POST http://localhost:3001/v1/embeddings \
 
 # Check logs after gateway restart
 grep -i "embedding" ~/.hermes/logs/agent.log | tail -5
-# Expected: "Embedding model loaded via HTTP: http://localhost:3001/v1, shape: (236, 1024)"
+# Expected: Embedding cache HIT / Text index cache HIT / Skill retriever ready: N skills
 ```
