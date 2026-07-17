@@ -13,6 +13,7 @@ Usage:
         hints = retriever.retrieve("help me debug this", top_k=5)
 """
 
+import hashlib
 import importlib.util
 import logging
 import math
@@ -358,8 +359,12 @@ class SkillRetriever:
             self._skill_name_to_idx = {
                 name: i for i, name in enumerate(self._skill_names)
             }
-            self._load_synonyms()
-            self._build_fts5_index()
+            # Text index (syn + BM25 tokens/idf): disk cache keyed by skill+syn mtime.
+            # Avoids jieba cold init on every Hermes process when skill set unchanged.
+            if not self._try_load_text_index_cache():
+                self._load_synonyms()
+                self._build_fts5_index()
+                self._save_text_index_cache()
             self._load_embedding_model()
             t1 = time.time()
             self._ready = True
@@ -374,6 +379,88 @@ class SkillRetriever:
             logger.warning("Skill retriever init failed: %s", e)
         finally:
             self._loading = False
+
+    def _text_index_cache_paths(self) -> tuple[Path, Path, str]:
+        from hermes_constants import get_hermes_home
+        home = get_hermes_home()
+        cache_path = home / ".eagle_eye_text_index.npz"
+        lock_path = home / ".eagle_eye_text_index.lock"
+        syn_path = Path(__file__).parent / "skill_synonyms.yaml"
+        # Key: skill name+desc set + synonyms file mtime/size (if present)
+        parts = [f"{n}\0{d}" for n, d in zip(self._skill_names, self._skill_descs)]
+        if syn_path.exists():
+            st = syn_path.stat()
+            parts.append(f"syn:{st.st_mtime_ns}:{st.st_size}")
+        else:
+            parts.append("syn:missing")
+        key = hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:16]
+        return cache_path, lock_path, key
+
+    def _try_load_text_index_cache(self) -> bool:
+        """Restore synonyms + FTS structures from disk. True on HIT."""
+        try:
+            import numpy as np
+        except ImportError:
+            return False
+        cache_path, _, key = self._text_index_cache_paths()
+        if not cache_path.exists():
+            return False
+        try:
+            data = np.load(cache_path, allow_pickle=True)
+            if str(data["cache_key"]) != key:
+                logger.info("Text index cache miss: skill/synonym set changed")
+                return False
+            self._synonyms = data["synonyms"].item()
+            self._synonym_index = data["synonym_index"].item()
+            self._doc_tokens = list(data["doc_tokens"])
+            self._idf = data["idf"].item()
+            # Index pre-tokenized; jieba still needed for query tokenization (cheap after disk cache).
+            logger.info(
+                "Text index cache HIT: %d skills, %d syn tokens (%.1fKB)",
+                len(self._skill_names),
+                len(self._synonym_index),
+                cache_path.stat().st_size / 1024,
+            )
+            return True
+        except Exception as e:
+            logger.debug("Text index cache load failed: %s", e)
+            return False
+
+    def _save_text_index_cache(self) -> None:
+        try:
+            import numpy as np
+            import fcntl
+        except ImportError:
+            return
+        cache_path, lock_path, key = self._text_index_cache_paths()
+        lock_fd = None
+        try:
+            lock_fd = open(lock_path, "a+")
+            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+            tmp = cache_path.with_name(f"{cache_path.name}.{os.getpid()}.writing")
+            with open(tmp, "wb") as f:
+                np.savez(
+                    f,
+                    cache_key=np.array(key),
+                    synonyms=np.array(self._synonyms, dtype=object),
+                    synonym_index=np.array(self._synonym_index, dtype=object),
+                    doc_tokens=np.array(self._doc_tokens, dtype=object),
+                    idf=np.array(self._idf, dtype=object),
+                )
+            tmp.replace(cache_path)
+            logger.info(
+                "Text index cached to disk: %s (%.1fKB, key=%s)",
+                cache_path, cache_path.stat().st_size / 1024, key,
+            )
+        except Exception as e:
+            logger.debug("Text index cache write failed: %s", e)
+        finally:
+            if lock_fd is not None:
+                try:
+                    fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+                    lock_fd.close()
+                except Exception:
+                    pass
 
     def _load_skills(self) -> None:
         from hermes_constants import get_hermes_home
@@ -469,6 +556,7 @@ class SkillRetriever:
         """Load synonym dictionary — Layer 3 source data."""
         import jieba
         import yaml
+        self._ensure_jieba()
 
         synonym_file = Path(__file__).parent / "skill_synonyms.yaml"
         if not synonym_file.exists():
@@ -541,7 +629,16 @@ class SkillRetriever:
             for t, df in all_doc_freq.items()
         }
 
+    def _ensure_jieba(self) -> None:
+        """Initialize jieba once per process (query path needs cut(); index may be cached)."""
+        if self._jieba_initialized:
+            return
+        import jieba
+        jieba.initialize()
+        self._jieba_initialized = True
+
     def _load_embedding_model(self) -> None:
+
         """Layer 4: Load dense embedding model.
 
         Uses an OpenAI-compatible HTTP embedding endpoint (e.g. llama.cpp
@@ -822,6 +919,7 @@ class SkillRetriever:
     def _fts5_search(self, query: str, k: int) -> list[tuple[int, float]]:
         """Layer 2: Clean BM25 search — name + description only, no synonym mixing."""
         import jieba
+        self._ensure_jieba()
 
         query_tokens = [
             t.strip() for t in jieba.cut(query)
@@ -845,6 +943,7 @@ class SkillRetriever:
     def _syn_search(self, query: str, k: int) -> list[tuple[int, float]]:
         """Layer 3: Synonym dictionary matching — independent scoring."""
         import jieba
+        self._ensure_jieba()
 
         query_tokens = [
             t.strip() for t in jieba.cut(query)

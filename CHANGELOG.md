@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 - L1 empty-content fallback; quieter emb init log
 - install prefers existing config / hermes enable (no yaml.dump thrash)
 - Incremental embedding cache (v2): per-skill hash reuse, v1 migrate, process lock, atomic write
+- Disk-cache text index (syn+BM25) beside emb: cold~360ms once, process restart ~15ms full L1–5 ready
 - Nested skill packages under parent SKILL.md (e.g. telegram-media-delivery)
 - L1 gated until init ready (no stale import-time triggers)
 - install enable checks plugins.enabled only (not whole-file eagle-eye string)
