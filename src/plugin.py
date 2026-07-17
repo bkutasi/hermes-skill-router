@@ -47,9 +47,10 @@ def _on_pre_llm_call(*, user_message: str = "", **_kwargs) -> dict | None:
         if stripped.startswith(pattern):
             return None
 
-    # Strip [Replying to: "..."] prefix — the real query follows the ]
-    if stripped.startswith("[Replying to:"):
-        bracket_end = stripped.find('"]', 14)  # skip opening [Replying to: "
+    # Strip Hermes reply prefixes — real query follows the closing "]
+    # Forms: [Replying to: "..."]  /  [Replying to your previous message: "..."]
+    if stripped.startswith("[Replying to"):
+        bracket_end = stripped.find('"]')
         if bracket_end != -1 and bracket_end + 2 < len(stripped):
             user_message = stripped[bracket_end + 2:].strip()
         else:

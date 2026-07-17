@@ -13,6 +13,7 @@ All notable changes to this project will be documented in this file.
 - Drop L1 hard triggers for skills missing after live scan (stale/orphan safety)
 - Repo cleanup: drop PROMPTS_*, example template, dual generator path
 - Spec Kit: constitution v1.0.0 + specs/001-lean-reliable-core
+- Hardening: clear skill lists on reload; safe emb partial (no v1 index migrate); recompute reuse under lock; unique cache tmp; case-insensitive L1; reply-prefix strip; install enable always writes; auto name-triggers only for long hyphenated names
 
 
 

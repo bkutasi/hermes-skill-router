@@ -130,7 +130,10 @@ def generate_triggers(skills: list[dict]) -> list[tuple[str, str]]:
             triggers.append((kw, skill_name))
     for skill in skills:
         name = skill["name"]
-        triggers.append((name, name))
+        # Auto name-trigger only when specific enough to avoid English false L1
+        # (plan, maps, clip, …). Manual triggers cover short high-value skills.
+        if len(name) >= 10 and "-" in name:
+            triggers.append((name, name))
     return triggers
 
 

@@ -117,6 +117,11 @@ class TestHardTrigger:
         assert SkillRetriever._hard_trigger("please debugging this") is None
         assert SkillRetriever._hard_trigger("please debug this") == "debugging-skill"
 
+    def test_tier1_case_insensitive(self, monkeypatch):
+        monkeypatch.setattr("skill_retriever._HARD_TRIGGERS", [("debug", "debugging-skill"), ("TDD", "tdd-skill")])
+        assert SkillRetriever._hard_trigger("please DEBUG this") == "debugging-skill"
+        assert SkillRetriever._hard_trigger("use tdd here") == "tdd-skill"
+
     def test_long_or_multiword_still_substring(self, monkeypatch):
         """Multi-word / long triggers still use plain substring matching."""
         monkeypatch.setattr("skill_retriever._HARD_TRIGGERS", [

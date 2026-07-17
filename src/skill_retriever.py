@@ -330,9 +330,11 @@ class SkillRetriever:
             m = re.search(
                 r"(?<![A-Za-z0-9_])" + re.escape(trigger) + r"(?![A-Za-z0-9_])",
                 query,
+                re.IGNORECASE,
             )
             return m.start() if m else -1
-        return query.find(trigger)
+        # Multi-word / long: case-insensitive substring
+        return query.lower().find(trigger.lower())
 
     def _lazy_init(self) -> None:
         self._loading = True
@@ -375,6 +377,12 @@ class SkillRetriever:
         from hermes_constants import get_hermes_home
         skills_dir = get_hermes_home() / "skills"
         hermes_agent_skills = get_hermes_home() / "hermes-agent" / "skills"
+
+        # Always rebuild lists — append-only would duplicate on retry/re-init.
+        self._skill_names = []
+        self._skill_descs = []
+        self._skill_paths = {}
+        self._doc_tokens = []
 
         seen = set()
         for base_dir in [skills_dir, hermes_agent_skills]:
@@ -601,14 +609,11 @@ class SkillRetriever:
                     if len(old_names) == len(old_hashes) == old_emb.shape[0]:
                         for i, (n, h) in enumerate(zip(old_names, old_hashes)):
                             reused[f"{n}\0{h}"] = old_emb[i]
-                elif endpoint_ok and old_emb.shape[0] == len(self._skill_names):
-                    # v1 cache (embeddings only): sorted scan order is stable —
-                    # attach current hashes so we can rewrite v2 without HTTP.
-                    for i, (n, h) in enumerate(zip(self._skill_names, text_hashes)):
-                        reused[f"{n}\0{h}"] = old_emb[i]
+                elif endpoint_ok:
+                    # v1 (no names/hashes): refuse index migrate — wrong vectors on reorder.
                     logger.info(
-                        "Embedding cache v1→v2 migrate: reused %d rows by stable order",
-                        len(reused),
+                        "Embedding cache v1 without names: full re-embed (%d rows)",
+                        old_emb.shape[0],
                     )
 
                 n_reuse = sum(
@@ -623,11 +628,6 @@ class SkillRetriever:
                 logger.info("Embedding cache partial load failed (%s); full re-embed", e)
                 reused = {}
 
-        to_embed_idx = [
-            i for i, (n, h) in enumerate(zip(self._skill_names, text_hashes))
-            if f"{n}\0{h}" not in reused
-        ]
-
         lock_fd = None
         try:
             # Serialize multi-process init (gateway + CLI both start eagle-eye)
@@ -635,10 +635,12 @@ class SkillRetriever:
                 import fcntl
                 lock_fd = open(lock_path, "a+")
                 fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
-            except Exception:
+            except Exception as e:
+                # Still proceed (degraded concurrency) — better than no L4 forever.
+                logger.warning("Embedding cache lock unavailable (%s); continuing unlocked", e)
                 lock_fd = None
 
-            # Peer may have written a full HIT while we waited
+            # After lock: peer may have finished — HIT or refresh partial reuse
             if cache_path.exists():
                 try:
                     cached = np.load(cache_path, allow_pickle=True)
@@ -651,8 +653,25 @@ class SkillRetriever:
                         self._emb_ready = True
                         self._emb_error = None
                         return
+                    # Recompute reuse from freshest disk state
+                    if "names" in cached.files and "text_hashes" in cached.files:
+                        old_url = str(cached["base_url"]) if "base_url" in cached.files else ""
+                        old_model = str(cached["model"]) if "model" in cached.files else ""
+                        if old_url in ("", base_url) and old_model in ("", model_name):
+                            old_emb = cached["embeddings"].astype(np.float32)
+                            old_names = [str(x) for x in cached["names"].tolist()]
+                            old_hashes = [str(x) for x in cached["text_hashes"].tolist()]
+                            if len(old_names) == len(old_hashes) == old_emb.shape[0]:
+                                reused = {}
+                                for i, (n, h) in enumerate(zip(old_names, old_hashes)):
+                                    reused[f"{n}\0{h}"] = old_emb[i]
                 except Exception:
                     pass
+
+            to_embed_idx = [
+                i for i, (n, h) in enumerate(zip(self._skill_names, text_hashes))
+                if f"{n}\0{h}" not in reused
+            ]
 
             headers = {"Content-Type": "application/json"}
             if api_key:
@@ -702,7 +721,9 @@ class SkillRetriever:
 
             # Atomic write: open binary handle so numpy does not append .npz
             try:
-                tmp_path = cache_path.with_name(cache_path.name + ".writing")
+                tmp_path = cache_path.with_name(
+                    f"{cache_path.name}.{os.getpid()}.writing"
+                )
                 with open(tmp_path, "wb") as f:
                     np.savez(
                         f,

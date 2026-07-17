@@ -44,28 +44,19 @@ p = Path('$HERMES_HOME/config.yaml')
 text = p.read_text(encoding='utf-8') if p.exists() else ''
 if 'eagle-eye' not in text:
     if 'plugins:' not in text:
-        text += '
-plugins:
-  enabled:
-    - eagle-eye
-'
+        text = text.rstrip() + '\n\nplugins:\n  enabled:\n    - eagle-eye\n'
+        p.write_text(text, encoding='utf-8')
     elif 'enabled:' in text:
-        # insert under enabled list
         lines = text.splitlines(True)
         out = []
-        for i, line in enumerate(lines):
+        for line in lines:
             out.append(line)
             if line.strip() == 'enabled:' or line.rstrip().endswith('enabled:'):
-                out.append('  - eagle-eye
-' if not line.startswith(' ') else '    - eagle-eye
-')
+                indent = '    ' if line.startswith(' ') else '  '
+                out.append(f'{indent}- eagle-eye\n')
         p.write_text(''.join(out), encoding='utf-8')
     else:
-        text += '
-plugins:
-  enabled:
-    - eagle-eye
-'
+        text = text.rstrip() + '\n  enabled:\n    - eagle-eye\n'
         p.write_text(text, encoding='utf-8')
 print('enabled')
 "
