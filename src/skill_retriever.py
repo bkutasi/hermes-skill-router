@@ -54,10 +54,10 @@ _SINGLETON_LOCK = threading.Lock()
 # These bypass all ranking — if query contains the trigger, return directly.
 #
 # Triggers are auto-generated from your skill library by:
-#   python scripts/build_real_config.py
+#   python scripts/build_config.py
 # Edit src/hard_triggers_generated.py and re-run if skills change.
 _HARD_TRIGGERS: list[tuple[str, str]] = [
-    # ── Auto-generated (from build_real_config.py) ──
+    # ── Auto-generated (from build_config.py) ──
 ]
 
 # Load generated triggers at import time using importlib (not exec)
@@ -249,7 +249,8 @@ class SkillRetriever:
     def _hard_trigger(query: str) -> str | None:
         """Layer 1: 3-tier matching against hard trigger table.
 
-        Tier 1: Exact substring match (fastest, 100% precise)
+        Tier 1: Exact match (substring for multi-word / long triggers;
+                 word-boundary for short single-token ASCII triggers).
                  Collects ALL matches, picks longest trigger (most specific),
                  then earliest position in query (closest to intent).
         Tier 2: Subsequence match — trigger CJK chars appear in order in query
@@ -262,10 +263,10 @@ class SkillRetriever:
         if not q:
             return None
 
-        # Tier 1: Collect ALL exact substring matches, pick the best one
+        # Tier 1: Collect ALL exact matches, pick the best one
         tier1_matches: list[tuple[str, str, int]] = []  # (trigger, skill, position)
         for trigger, skill in _HARD_TRIGGERS:
-            idx = q.find(trigger)
+            idx = SkillRetriever._tier1_index(trigger, q)
             if idx != -1:
                 tier1_matches.append((trigger, skill, idx))
 
@@ -310,6 +311,28 @@ class SkillRetriever:
 
         return None
 
+    @staticmethod
+    def _tier1_index(trigger: str, query: str) -> int:
+        """Return match start index, or -1.
+
+        Short single-token ASCII triggers (len ≤ 8, no spaces) require
+        word boundaries so ``debug`` does not fire on ``debugging``.
+        Multi-word and long triggers stay plain substring.
+        """
+        if not trigger:
+            return -1
+        if (
+            len(trigger) <= 8
+            and " " not in trigger
+            and _ASCII_RE.search(trigger)
+            and not _CJK_RE.search(trigger)
+        ):
+            m = re.search(
+                r"(?<![A-Za-z0-9_])" + re.escape(trigger) + r"(?![A-Za-z0-9_])",
+                query,
+            )
+            return m.start() if m else -1
+        return query.find(trigger)
 
     def _lazy_init(self) -> None:
         self._loading = True
@@ -355,9 +378,11 @@ class SkillRetriever:
 
         Flat:   skills/<name>/SKILL.md
         Nested: skills/<category>/<name>/SKILL.md
+
+        Skips hidden dirs (``.archive``, ``.hub``, ``.curator_backups``, …).
         """
         for entry in sorted(base_dir.iterdir()):
-            if not entry.is_dir():
+            if not entry.is_dir() or entry.name.startswith("."):
                 continue
             skill_md = entry / "SKILL.md"
             if skill_md.exists():
@@ -374,12 +399,15 @@ class SkillRetriever:
                 except Exception:
                     pass
             else:
-                # Could be a category directory — recurse one level
-                has_skill_md = any(
-                    (sub / "SKILL.md").exists()
-                    for sub in entry.iterdir()
-                    if sub.is_dir()
-                )
+                # Category directory — recurse (skip hidden children)
+                try:
+                    has_skill_md = any(
+                        (sub / "SKILL.md").exists()
+                        for sub in entry.iterdir()
+                        if sub.is_dir() and not sub.name.startswith(".")
+                    )
+                except OSError:
+                    has_skill_md = False
                 if has_skill_md:
                     self._scan_skill_dir(entry, seen)
 
@@ -511,22 +539,27 @@ class SkillRetriever:
         self._emb_api_key = api_key
         self._emb_model_name = model_name
 
-        # Build a cache key from the skill set + endpoint config.
-        # If anything changes (new skill, edited description, different
-        # embedding model/URL), the cache is invalidated automatically.
+        # Per-skill text used for embedding + cache identity.
+        # Format must stay stable across restarts so unchanged rows reuse.
         import hashlib
-        texts = [f"{n}, {d}" for n, d in zip(self._skill_names, self._skill_descs)]
-        manifest_src = "\n".join(texts) + f"\n{base_url}\n{model_name}"
+        texts = [f"{n}\n{d}" for n, d in zip(self._skill_names, self._skill_descs)]
+        text_hashes = [
+            hashlib.sha256(t.encode("utf-8")).hexdigest()[:16] for t in texts
+        ]
+        # Full-set key (HIT path). Includes endpoint so model/URL swaps invalidate.
+        manifest_src = "\n".join(
+            f"{n}\0{h}" for n, h in zip(self._skill_names, text_hashes)
+        ) + f"\n{base_url}\n{model_name}"
         cache_key = hashlib.sha256(manifest_src.encode("utf-8")).hexdigest()[:16]
 
-        # Cache path: ~/.hermes/.eagle_eye_emb_cache.npz
         from hermes_constants import get_hermes_home
         cache_path = get_hermes_home() / ".eagle_eye_emb_cache.npz"
+        lock_path = get_hermes_home() / ".eagle_eye_emb_cache.lock"
 
-        # ── Try disk cache first ──
+        # ── Full HIT: identical skill set + texts + endpoint ──
         if cache_path.exists():
             try:
-                cached = np.load(cache_path, allow_pickle=False)
+                cached = np.load(cache_path, allow_pickle=True)
                 if str(cached["cache_key"]) == cache_key:
                     self._emb_matrix = cached["embeddings"].astype(np.float32)
                     logger.info(
@@ -537,53 +570,149 @@ class SkillRetriever:
                     self._emb_ready = True
                     self._emb_error = None
                     return
-                else:
-                    logger.info("Embedding cache miss: skill set changed, re-embedding")
             except Exception as e:
-                logger.debug("Embedding cache read failed: %s", e)
+                logger.debug("Embedding cache full-HIT read failed: %s", e)
 
-        # ── Cache miss: embed all skills via HTTP in batches ──
+        # ── Partial reuse: keep rows for unchanged name+text, re-embed deltas ──
+        reused: dict[str, object] = {}
+        if cache_path.exists():
+            try:
+                cached = np.load(cache_path, allow_pickle=True)
+                old_key = str(cached["cache_key"])
+                old_url = str(cached["base_url"]) if "base_url" in cached.files else ""
+                old_model = str(cached["model"]) if "model" in cached.files else ""
+                old_emb = cached["embeddings"].astype(np.float32)
+                endpoint_ok = old_url in ("", base_url) and old_model in ("", model_name)
+
+                if endpoint_ok and "names" in cached.files and "text_hashes" in cached.files:
+                    old_names = [str(x) for x in cached["names"].tolist()]
+                    old_hashes = [str(x) for x in cached["text_hashes"].tolist()]
+                    if len(old_names) == len(old_hashes) == old_emb.shape[0]:
+                        for i, (n, h) in enumerate(zip(old_names, old_hashes)):
+                            reused[f"{n}\0{h}"] = old_emb[i]
+                elif endpoint_ok and old_emb.shape[0] == len(self._skill_names):
+                    # v1 cache (embeddings only): sorted scan order is stable —
+                    # attach current hashes so we can rewrite v2 without HTTP.
+                    for i, (n, h) in enumerate(zip(self._skill_names, text_hashes)):
+                        reused[f"{n}\0{h}"] = old_emb[i]
+                    logger.info(
+                        "Embedding cache v1→v2 migrate: reused %d rows by stable order",
+                        len(reused),
+                    )
+
+                n_reuse = sum(
+                    1 for n, h in zip(self._skill_names, text_hashes)
+                    if f"{n}\0{h}" in reused
+                )
+                logger.info(
+                    "Embedding cache PARTIAL: full_key %s→%s; reusable_rows=%d/%d",
+                    old_key[:8], cache_key[:8], n_reuse, len(self._skill_names),
+                )
+            except Exception as e:
+                logger.info("Embedding cache partial load failed (%s); full re-embed", e)
+                reused = {}
+
+        to_embed_idx = [
+            i for i, (n, h) in enumerate(zip(self._skill_names, text_hashes))
+            if f"{n}\0{h}" not in reused
+        ]
+
+        lock_fd = None
         try:
+            # Serialize multi-process init (gateway + CLI both start eagle-eye)
+            try:
+                import fcntl
+                lock_fd = open(lock_path, "a+")
+                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+            except Exception:
+                lock_fd = None
+
+            # Peer may have written a full HIT while we waited
+            if cache_path.exists():
+                try:
+                    cached = np.load(cache_path, allow_pickle=True)
+                    if str(cached["cache_key"]) == cache_key:
+                        self._emb_matrix = cached["embeddings"].astype(np.float32)
+                        logger.info(
+                            "Embedding cache HIT after lock: %s",
+                            self._emb_matrix.shape,
+                        )
+                        self._emb_ready = True
+                        self._emb_error = None
+                        return
+                except Exception:
+                    pass
+
             headers = {"Content-Type": "application/json"}
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
 
-            all_embeddings: list[list[float]] = []
-            for i in range(0, len(texts), batch_size):
-                batch = texts[i:i + batch_size]
-                resp = requests.post(
-                    f"{base_url}/embeddings",
-                    headers=headers,
-                    json={"input": batch, "model": model_name},
-                    timeout=60,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                # Sort by index to ensure order matches input
-                sorted_data = sorted(data["data"], key=lambda x: x["index"])
-                for item in sorted_data:
-                    all_embeddings.append(item["embedding"])
-
-            self._emb_matrix = np.array(all_embeddings, dtype=np.float32)
-
-            # L2-normalize for cosine similarity via dot product
-            norms = np.linalg.norm(self._emb_matrix, axis=1, keepdims=True)
-            norms[norms == 0] = 1.0
-            self._emb_matrix = self._emb_matrix / norms
-
-            # Save to disk cache
-            try:
-                np.savez(cache_path, embeddings=self._emb_matrix, cache_key=np.array(cache_key))
+            new_vecs: dict[int, object] = {}
+            if to_embed_idx:
                 logger.info(
-                    "Embedding matrix cached to disk: %s (%.1fMB)",
-                    cache_path, self._emb_matrix.nbytes / 1e6,
+                    "Embedding %d/%d skills via HTTP (%d reused)",
+                    len(to_embed_idx), len(texts), len(texts) - len(to_embed_idx),
+                )
+                for start in range(0, len(to_embed_idx), batch_size):
+                    batch_idxs = to_embed_idx[start:start + batch_size]
+                    batch = [texts[i] for i in batch_idxs]
+                    resp = requests.post(
+                        f"{base_url}/embeddings",
+                        headers=headers,
+                        json={"input": batch, "model": model_name},
+                        timeout=60,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    sorted_data = sorted(data["data"], key=lambda x: x["index"])
+                    for local_i, item in enumerate(sorted_data):
+                        vec = np.array(item["embedding"], dtype=np.float32)
+                        nrm = np.linalg.norm(vec)
+                        if nrm > 0:
+                            vec = vec / nrm
+                        new_vecs[batch_idxs[local_i]] = vec
+            else:
+                logger.info(
+                    "Embedding cache reuse: all %d skills reused (no HTTP)",
+                    len(texts),
+                )
+
+            rows = []
+            for i, (n, h) in enumerate(zip(self._skill_names, text_hashes)):
+                key = f"{n}\0{h}"
+                if i in new_vecs:
+                    rows.append(new_vecs[i])
+                elif key in reused:
+                    rows.append(np.asarray(reused[key], dtype=np.float32))
+                else:
+                    raise RuntimeError(f"missing embedding for skill {n!r}")
+
+            self._emb_matrix = np.stack(rows, axis=0).astype(np.float32)
+
+            # Atomic write: open binary handle so numpy does not append .npz
+            try:
+                tmp_path = cache_path.with_name(cache_path.name + ".writing")
+                with open(tmp_path, "wb") as f:
+                    np.savez(
+                        f,
+                        embeddings=self._emb_matrix,
+                        cache_key=np.array(cache_key),
+                        names=np.array(self._skill_names, dtype=object),
+                        text_hashes=np.array(text_hashes, dtype=object),
+                        base_url=np.array(base_url),
+                        model=np.array(model_name),
+                    )
+                tmp_path.replace(cache_path)
+                logger.info(
+                    "Embedding matrix cached to disk: %s (%.1fMB, key=%s)",
+                    cache_path, self._emb_matrix.nbytes / 1e6, cache_key,
                 )
             except Exception as e:
-                logger.debug("Could not write embedding cache: %s", e)
+                logger.warning("Could not write embedding cache: %s", e)
 
             logger.info(
-                "Embedding model loaded via HTTP: %s, shape: %s",
-                base_url, self._emb_matrix.shape,
+                "Embedding model ready via HTTP: %s, shape: %s (embedded %d new)",
+                base_url, self._emb_matrix.shape, len(to_embed_idx),
             )
             self._emb_ready = True
             self._emb_error = None
@@ -591,6 +720,14 @@ class SkillRetriever:
             logger.warning("Embedding model load failed (%s); FTS5+Syn only", e)
             self._emb_matrix = None
             self._emb_error = str(e)
+        finally:
+            if lock_fd is not None:
+                try:
+                    import fcntl
+                    fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+                    lock_fd.close()
+                except Exception:
+                    pass
 
 
     def _retrieve_inner(self, query: str, k: int) -> list[str]:

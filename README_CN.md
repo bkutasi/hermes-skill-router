@@ -67,13 +67,12 @@ git clone https://github.com/willingning-coder/eagle-eye.git
 cd eagle-eye
 
 # 2. 从本地技能库生成配置
-python scripts/generate_config.py
+python scripts/build_config.py
 
 # 3. 审查并自定义
 #    - 编辑 src/skill_retriever.py 中的 _HARD_TRIGGERS
 #    - 编辑 src/skill_synonyms.yaml
-#    （参见 PROMPTS_CN.md 获取LLM辅助生成提示词）
-
+#    
 # 4. 安装
 bash scripts/install.sh
 
@@ -89,10 +88,10 @@ hermes gateway restart
 
 ```bash
 # 扫描本地技能并生成模板配置
-python scripts/generate_config.py
+python scripts/build_config.py
 
 # 或仅列出发现的技能
-python scripts/generate_config.py --scan-only
+python scripts/build_config.py --scan-only
 ```
 
 ### 手动自定义
@@ -102,10 +101,6 @@ python scripts/generate_config.py --scan-only
 | **硬检测词** | `src/skill_retriever.py` → `_HARD_TRIGGERS` | 添加`(关键词, 技能名)`元组，更具体的放前面 |
 | **同义词词典** | `src/skill_synonyms.yaml` | 将自然语言术语映射到技能，每个技能5–15个 |
 | **嵌入模型** | 环境变量`HERMES_EMBEDDING_MODEL` | 替换为不同的sentence-transformers模型 |
-
-### LLM辅助生成
-
-使用 [`PROMPTS_CN.md`](PROMPTS_CN.md) 或 [`PROMPTS_EN.md`](PROMPTS_EN.md) 中的提示词，配合任意LLM，从你的技能列表自动生成高质量的触发词和同义词。
 
 ## 环境变量
 
@@ -145,15 +140,13 @@ eagle-eye/
 │   ├── plugin.py               # Hermes插件（pre_llm_call钩子）
 │   └── plugin.yaml             # 插件清单
 ├── scripts/
-│   ├── generate_config.py      # 从本地技能自动生成配置
+│   ├── build_config.py      # 从本地技能自动生成配置
 │   └── install.sh              # 一键安装脚本
 ├── templates/
 │   └── hard_triggers.example.py  # 硬检测词格式参考
 ├── README.md                   # English文档
 ├── README_CN.md                # 本文件（中文）
 ├── ARCHITECTURE.md             # 技术深潜文档
-├── PROMPTS_EN.md               # LLM配置生成提示词（English）
-├── PROMPTS_CN.md               # LLM配置生成提示词（中文）
 ├── CHANGELOG.md                # 版本历史
 └── LICENSE                     # MIT
 ```

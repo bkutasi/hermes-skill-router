@@ -71,12 +71,11 @@ git clone https://github.com/bkutasi/eagle-eye.git
 cd eagle-eye
 
 # 2. Generate config from your local skill library
-python scripts/build_real_config.py
+python scripts/build_config.py
 
-# 3. Review and customize
-#    - Edit src/hard_triggers_generated.py (auto-generated triggers)
-#    - Edit src/skill_synonyms.yaml (auto-generated synonyms)
-#    (See PROMPTS.md for LLM-assisted generation)
+# 3. Review if needed
+#    - src/hard_triggers_generated.py
+#    - src/skill_synonyms.yaml
 
 # 4. Install
 bash scripts/install.sh
@@ -92,14 +91,8 @@ Eagle Eye ships with **minimal example data**. The real power comes from generat
 ### Auto-Generate (Recommended)
 
 ```bash
-# Generate real triggers + synonyms from your skill descriptions
-python scripts/build_real_config.py
-
-# Or use the basic generator (produces TODO templates)
-python scripts/generate_config.py
-
-# Or just list what was found
-python scripts/generate_config.py --scan-only
+python scripts/build_config.py              # triggers + synonyms
+python scripts/build_config.py --scan-only  # list skills
 ```
 
 ### Manual Customization
@@ -109,10 +102,6 @@ python scripts/generate_config.py --scan-only
 | **Hard Triggers** | `src/hard_triggers_generated.py` | Add `(keyword, skill-name)` tuples. More specific first. |
 | **Synonym Dictionary** | `src/skill_synonyms.yaml` | Map natural language terms to skills. 5–15 per skill. |
 | **Embedding Endpoint** | `HERMES_EMBEDDING_BASE_URL` env var | Point to your OpenAI-compatible embedding server. |
-
-### LLM-Assisted Generation
-
-Use the prompts in [`PROMPTS_EN.md`](PROMPTS_EN.md) or [`PROMPTS_CN.md`](PROMPTS_CN.md) with any LLM to generate high-quality triggers and synonyms from your skill list.
 
 ## Environment Variables
 
@@ -149,22 +138,22 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md) for a deep technical dive covering:
 ```
 eagle-eye/
 ├── src/
-│   ├── skill_retriever.py      # Core 5-layer retrieval engine
-│   ├── plugin.py               # Hermes plugin (pre_llm_call hook)
-│   └── plugin.yaml             # Plugin manifest
+│   ├── skill_retriever.py           # 5-layer retrieval engine
+│   ├── plugin.py                    # pre_llm_call hook
+│   ├── plugin.yaml
+│   ├── hard_triggers_generated.py   # generated (gitignored)
+│   └── skill_synonyms.yaml          # generated (gitignored)
 ├── scripts/
-│   ├── build_real_config.py    # Generate real triggers + synonyms from skills
-│   ├── generate_config.py      # Basic config generator (TODO templates)
-│   └── install.sh              # One-command installation
-├── templates/
-│   └── hard_triggers.example.py  # Trigger format reference
-├── README.md                   # This file (English)
-├── README_CN.md                # 中文文档
-├── ARCHITECTURE.md             # Technical deep dive
-├── PROMPTS_EN.md               # LLM prompts for config generation (English)
-├── PROMPTS_CN.md               # LLM prompts for config generation (中文)
-├── CHANGELOG.md                # Version history
-└── LICENSE                     # MIT
+│   ├── build_config.py              # only config generator
+│   ├── install.sh
+│   ├── build_real_config.py         # shim → build_config
+│   └── generate_config.py           # shim → build_config
+├── tests/
+├── docs/embedding-server.md
+├── README.md / README_CN.md
+├── ARCHITECTURE.md
+├── CHANGELOG.md
+└── LICENSE
 ```
 
 ## Dependencies
@@ -193,7 +182,7 @@ This fork is based on [willingning-coder/eagle-eye](https://github.com/willingni
 
 - **Fixed skill discovery for flat directory layouts.** The original code only handled `skills/<category>/<skill_name>/SKILL.md` (nested). Now also handles `skills/<skill_name>/SKILL.md` (flat) via recursive scanning. Both layouts can coexist in the same skills directory.
 
-- **Added `scripts/build_real_config.py`** — generates real hard triggers and synonyms from skill names and descriptions, with 70+ manual high-confidence triggers for common Hermes skill patterns. The original `generate_config.py` only produced TODO templates.
+- **Single config surface `scripts/build_config.py`** — real hard triggers + synonyms from skill tree (manual overrides + name triggers). Old `generate_config` / `build_real_config` names are shims.
 
 - **Triggers loaded from external file.** `_HARD_TRIGGERS` is now loaded at import time from `hard_triggers_generated.py` (auto-generated, gitignored). This keeps user-specific triggers separate from the engine code.
 

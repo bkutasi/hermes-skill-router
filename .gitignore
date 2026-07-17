@@ -21,3 +21,7 @@ src/skill_synonyms.yaml
 # OS
 .DS_Store
 Thumbs.db
+.specify/
+.hermes/
+.pytest_cache/
+*.npz

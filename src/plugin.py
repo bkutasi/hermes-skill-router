@@ -79,6 +79,23 @@ def _on_pre_llm_call(*, user_message: str = "", **_kwargs) -> dict | None:
             skill_name = result.get("skill_name", skills[0])
             content = retriever.get_skill_content(skill_name) or ""
 
+            # Paths may still be empty if L1 raced ahead of background init.
+            # Fall back to a lightweight name hint instead of empty injection.
+            if not content.strip():
+                desc = retriever.get_skill_desc(skill_name)
+                desc_bit = f" — {desc}" if desc else ""
+                hint = (
+                    f"## Skill Routing (Hard Trigger: {skill_name})\n"
+                    f'[System: The skill "{skill_name}" was matched with 100% confidence'
+                    f"{desc_bit}. Load via skill_view(\"{skill_name}\") "
+                    f"— content not yet cached.]\n"
+                )
+                logger.info(
+                    "Skill retriever L1: hint-only for %s (content not ready)",
+                    skill_name,
+                )
+                return {"context": hint}
+
             # Cap injected content — full SKILL.md can be 100K+ chars
             _L1_CAP = 4000
             truncated = len(content) > _L1_CAP
@@ -142,17 +159,13 @@ def register(ctx) -> None:
     """Register the pre_llm_call hook with Hermes plugin system."""
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     logger.info("eagle-eye plugin registered (pre_llm_call hook)")
-    # Log embedding health at startup so degraded mode is visible
+    # Kick off singleton init in background; avoid noisy racey emb warnings.
     try:
         from .skill_retriever import get_skill_retriever
         retriever = get_skill_retriever()
         if retriever.is_embedding_ready():
             logger.info("eagle-eye: embedding layer operational (L4 active)")
         else:
-            logger.warning(
-                "eagle-eye: embedding layer NOT ready — degraded mode (L2-3 only). "
-                "Error: %s",
-                retriever._emb_error or "init pending",
-            )
+            logger.info("eagle-eye: embedding init started (background)")
     except Exception as e:
-        logger.warning("eagle-eye: could not check embedding health: %s", e)
+        logger.warning("eagle-eye: could not start retriever: %s", e)

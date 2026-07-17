@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.0] - 2026-07-17
+
+### Changed
+- Single config CLI: `scripts/build_config.py` (shims keep old names)
+- Skip hidden skill dirs (`.archive`, …); short-ASCII L1 word boundaries
+- L1 empty-content fallback; quieter emb init log
+- install prefers existing config / hermes enable (no yaml.dump thrash)
+- Incremental embedding cache (v2): per-skill hash reuse, v1 migrate, process lock, atomic write
+- Repo cleanup: drop PROMPTS_*, example template, dual generator path
+
+
 
 ## [1.2.0] - 2026-07-08
 

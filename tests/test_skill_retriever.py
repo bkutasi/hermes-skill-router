@@ -111,6 +111,21 @@ class TestHardTrigger:
         monkeypatch.setattr("skill_retriever._HARD_TRIGGERS", [("debug", "debugging-skill")])
         assert SkillRetriever._hard_trigger("please debug this") == "debugging-skill"
 
+    def test_short_ascii_word_boundary(self, monkeypatch):
+        """Short ASCII triggers require word boundaries (debug ⊄ debugging)."""
+        monkeypatch.setattr("skill_retriever._HARD_TRIGGERS", [("debug", "debugging-skill")])
+        assert SkillRetriever._hard_trigger("please debugging this") is None
+        assert SkillRetriever._hard_trigger("please debug this") == "debugging-skill"
+
+    def test_long_or_multiword_still_substring(self, monkeypatch):
+        """Multi-word / long triggers still use plain substring matching."""
+        monkeypatch.setattr("skill_retriever._HARD_TRIGGERS", [
+            ("root cause", "debugging-skill"),
+            ("systematic-debugging", "debugging-skill"),
+        ])
+        assert SkillRetriever._hard_trigger("find the root cause now") == "debugging-skill"
+        assert SkillRetriever._hard_trigger("use systematic-debugging please") == "debugging-skill"
+
     def test_longest_wins(self, monkeypatch):
         """When two triggers match, the longer (more specific) one wins."""
         monkeypatch.setattr("skill_retriever._HARD_TRIGGERS", [
@@ -440,3 +455,36 @@ class TestNonBlockingFirstQuery:
 
         mock_init.assert_not_called()
         assert result == {"skills": [], "layer": "none"}
+
+
+# ── Skill directory scan tests ───────────────────────────
+
+
+class TestScanSkillDir:
+    def test_skips_hidden_dirs(self, tmp_path, monkeypatch):
+        """Dotdirs like .archive are not indexed."""
+        monkeypatch.setenv("HERMES_DISABLE_SKILL_RETRIEVAL", "1")
+
+        skills = tmp_path / "skills"
+        (skills / "live-skill").mkdir(parents=True)
+        (skills / "live-skill" / "SKILL.md").write_text(
+            "---\ndescription: live\n---\n", encoding="utf-8"
+        )
+        (skills / ".archive" / "dead-skill").mkdir(parents=True)
+        (skills / ".archive" / "dead-skill" / "SKILL.md").write_text(
+            "---\ndescription: dead\n---\n", encoding="utf-8"
+        )
+        (skills / ".hub" / "hub-skill").mkdir(parents=True)
+        (skills / ".hub" / "hub-skill" / "SKILL.md").write_text(
+            "---\ndescription: hub\n---\n", encoding="utf-8"
+        )
+
+        r = SkillRetriever()
+        r._skill_names = []
+        r._skill_descs = []
+        r._skill_paths = {}
+        r._scan_skill_dir(skills, set())
+        assert r._skill_names == ["live-skill"]
+        assert "dead-skill" not in r._skill_names
+        assert "hub-skill" not in r._skill_names
+
