@@ -340,6 +340,17 @@ class SkillRetriever:
         try:
             t0 = time.time()
             self._load_skills()
+            # Drop L1 rows for skills not in live scan (stale regen / archive).
+            global _HARD_TRIGGERS
+            valid = set(self._skill_names)
+            before = len(_HARD_TRIGGERS)
+            _HARD_TRIGGERS = [(t, s) for t, s in _HARD_TRIGGERS if s in valid]
+            dropped = before - len(_HARD_TRIGGERS)
+            if dropped:
+                logger.info(
+                    "Dropped %d hard triggers for missing skills (%d remain)",
+                    dropped, len(_HARD_TRIGGERS),
+                )
             self._skill_name_to_idx = {
                 name: i for i, name in enumerate(self._skill_names)
             }

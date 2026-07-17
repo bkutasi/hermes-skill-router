@@ -21,7 +21,8 @@ src/skill_synonyms.yaml
 # OS
 .DS_Store
 Thumbs.db
-.specify/
+
+# Local agent / tool state (Spec Kit tracked under .specify/)
 .hermes/
 .pytest_cache/
 *.npz

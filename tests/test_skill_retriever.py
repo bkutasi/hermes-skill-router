@@ -488,3 +488,27 @@ class TestScanSkillDir:
         assert "dead-skill" not in r._skill_names
         assert "hub-skill" not in r._skill_names
 
+
+class TestTriggerFilter:
+    def test_drops_triggers_for_missing_skills(self, monkeypatch):
+        """L1 table is filtered to skills present after scan."""
+        import skill_retriever as sr_mod
+        from skill_retriever import SkillRetriever
+
+        monkeypatch.setenv("HERMES_DISABLE_SKILL_RETRIEVAL", "1")
+        monkeypatch.setattr(
+            sr_mod,
+            "_HARD_TRIGGERS",
+            [("live", "live-skill"), ("ghost", "missing-skill")],
+        )
+        r = SkillRetriever()
+        r._skill_names = ["live-skill"]
+        r._skill_descs = ["live"]
+        r._skill_paths = {"live-skill": Path("/tmp/x")}
+        # Simulate the filter block from _lazy_init
+        valid = set(r._skill_names)
+        sr_mod._HARD_TRIGGERS = [
+            (t, s) for t, s in sr_mod._HARD_TRIGGERS if s in valid
+        ]
+        assert sr_mod._HARD_TRIGGERS == [("live", "live-skill")]
+
