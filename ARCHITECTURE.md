@@ -7,7 +7,7 @@ into the user message path. No core skill-list replacement.
 
 | Layer | Job | Fail mode |
 |-------|-----|-----------|
-| L1 | Hard triggers → direct SKILL.md inject (4k cap) | Skip until init ready; empty body → hint-only |
+| L1 | Hard triggers → strong canonical `skill_view()` hint | Skip until init ready |
 | L2 | In-memory BM25 on name+description (jieba tokens) | Empty if no tokens |
 | L3 | Synonym reverse index | Empty if no yaml |
 | L4 | HTTP embeddings, cosine via L2-normalized matrix | Degrade to L2+L3 |
@@ -17,8 +17,8 @@ into the user message path. No core skill-list replacement.
 
 1. Scan `~/.hermes/skills` + `~/.hermes/hermes-agent/skills` (skip `.*` dirs; nested packages under a parent `SKILL.md` counted).
 2. Filter hard triggers to live skill names.
-3. **Text index cache** (`~/.hermes/.eagle_eye_text_index.npz`): load synonyms + BM25 if skill/syn key matches; else build (jieba) and write.
-4. **Emb cache** (`~/.hermes/.eagle_eye_emb_cache.npz`): full HIT, or partial row reuse by name+text hash, else HTTP batch. Process lock + atomic write.
+3. **Text index cache** (`~/.hermes/.hermes_skill_router_text_index.npz`): load synonyms + BM25 if skill/syn key matches; else build (jieba) and write.
+4. **Emb cache** (`~/.hermes/.hermes_skill_router_emb_cache.npz`): full HIT, or partial row reuse by name+text hash, else HTTP batch. Process lock + atomic write.
 
 Measured (≈227 skills): cold build ~0.3–0.4s; warm process ready **~15ms** with both caches HIT.
 
@@ -42,7 +42,7 @@ Min RRF score and top-1 confidence floor drop pure noise.
 - Auto name-trigger only for long hyphenated names (`len≥10` and `-`) to avoid English false L1.
 - Synonyms from name parts + description keywords + manuals.
 
-Then `bash scripts/install.sh` copies into `~/.hermes/plugins/eagle-eye/`.
+Then `bash scripts/install.sh` copies into `~/.hermes/plugins/hermes-skill-router/` and retires the legacy `eagle-eye` identity.
 
 ## Non-goals
 

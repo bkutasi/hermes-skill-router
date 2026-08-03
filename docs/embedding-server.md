@@ -1,4 +1,4 @@
-# Eagle Eye Embedding Server
+# Hermes Skill Router Embedding Server
 
 ## Endpoint
 
@@ -30,7 +30,7 @@ HERMES_EMBEDDING_BASE_URL=http://localhost:3001/v1
 
 ## Usage
 
-The eagle-eye skill retriever calls `POST /v1/embeddings` with batch input:
+Hermes Skill Router calls `POST /v1/embeddings` with batch input:
 
 ```json
 {
@@ -59,13 +59,14 @@ Environment variables (read by `skill_retriever.py`):
 | `HERMES_EMBEDDING_MODEL` | `default` | `default` (llama.cpp ignores) |
 | `HERMES_EMBEDDING_API_KEY` | (none) | (not needed) |
 | `HERMES_EMBEDDING_BATCH_SIZE` | `16` | `16` |
+| `HERMES_EMBEDDING_TIMEOUT_SECONDS` | `2` | `2` |
 
 ## Cache
 
 | File | Role |
 |------|------|
-| `~/.hermes/.eagle_eye_emb_cache.npz` | Dense matrix; per-skill text hash row reuse |
-| `~/.hermes/.eagle_eye_text_index.npz` | Synonyms + BM25 tokens (no jieba rebuild on HIT) |
+| `~/.hermes/.hermes_skill_router_emb_cache.npz` | Dense matrix; per-skill text hash row reuse |
+| `~/.hermes/.hermes_skill_router_text_index.npz` | Synonyms + BM25 tokens (no jieba rebuild on HIT) |
 
 Emb key includes names, descriptions, `base_url`, model. Text-index key includes names, descriptions, synonym file mtime/size.
 

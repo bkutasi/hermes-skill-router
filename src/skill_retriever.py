@@ -32,6 +32,16 @@ logger = logging.getLogger(__name__)
 
 _DISABLE_ENV = "HERMES_DISABLE_SKILL_RETRIEVAL"
 _TOP_K_ENV = "HERMES_SKILL_RETRIEVAL_TOP_K"
+_EMBEDDING_TIMEOUT_ENV = "HERMES_EMBEDDING_TIMEOUT_SECONDS"
+
+
+def _embedding_timeout_seconds() -> float:
+    """Return a bounded timeout so a local embedding outage stays cheap."""
+    try:
+        value = float(os.environ.get(_EMBEDDING_TIMEOUT_ENV, "2"))
+    except ValueError:
+        return 2.0
+    return min(max(value, 0.1), 30.0)
 
 # RRF parameters
 _RRF_K = 60
@@ -383,8 +393,8 @@ class SkillRetriever:
     def _text_index_cache_paths(self) -> tuple[Path, Path, str]:
         from hermes_constants import get_hermes_home
         home = get_hermes_home()
-        cache_path = home / ".eagle_eye_text_index.npz"
-        lock_path = home / ".eagle_eye_text_index.lock"
+        cache_path = home / ".hermes_skill_router_text_index.npz"
+        lock_path = home / ".hermes_skill_router_text_index.lock"
         syn_path = Path(__file__).parent / "skill_synonyms.yaml"
         # Key: skill name+desc set + synonyms file mtime/size (if present)
         parts = [f"{n}\0{d}" for n, d in zip(self._skill_names, self._skill_descs)]
@@ -656,6 +666,7 @@ class SkillRetriever:
           HERMES_EMBEDDING_MODEL     (default: default — llama.cpp ignores it)
           HERMES_EMBEDDING_API_KEY   (default: not-required)
           HERMES_EMBEDDING_BATCH_SIZE (default: 16)
+          HERMES_EMBEDDING_TIMEOUT_SECONDS (default: 2)
         """
         try:
             import numpy as np
@@ -692,8 +703,8 @@ class SkillRetriever:
         cache_key = hashlib.sha256(manifest_src.encode("utf-8")).hexdigest()[:16]
 
         from hermes_constants import get_hermes_home
-        cache_path = get_hermes_home() / ".eagle_eye_emb_cache.npz"
-        lock_path = get_hermes_home() / ".eagle_eye_emb_cache.lock"
+        cache_path = get_hermes_home() / ".hermes_skill_router_emb_cache.npz"
+        lock_path = get_hermes_home() / ".hermes_skill_router_emb_cache.lock"
 
         # ── Full HIT: identical skill set + texts + endpoint ──
         if cache_path.exists():
@@ -750,7 +761,7 @@ class SkillRetriever:
 
         lock_fd = None
         try:
-            # Serialize multi-process init (gateway + CLI both start eagle-eye)
+            # Serialize multi-process init (gateway + CLI may start concurrently)
             try:
                 import fcntl
                 lock_fd = open(lock_path, "a+")
@@ -810,7 +821,7 @@ class SkillRetriever:
                         f"{base_url}/embeddings",
                         headers=headers,
                         json={"input": batch, "model": model_name},
-                        timeout=60,
+                        timeout=_embedding_timeout_seconds(),
                     )
                     resp.raise_for_status()
                     data = resp.json()
@@ -990,7 +1001,7 @@ class SkillRetriever:
                 f"{self._emb_base_url}/embeddings",
                 headers=headers,
                 json={"input": [query], "model": self._emb_model_name},
-                timeout=30,
+                timeout=_embedding_timeout_seconds(),
             )
             resp.raise_for_status()
             query_emb = np.array(resp.json()["data"][0]["embedding"], dtype=np.float32)

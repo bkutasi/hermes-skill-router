@@ -53,6 +53,7 @@ sys.modules.setdefault("hermes_constants", _hermes_const)
 # ── Import after mocks are in place ──────────────────────
 from skill_retriever import (
     SkillRetriever,
+    _embedding_timeout_seconds,
     _is_subsequence,
     _HARD_TRIGGERS,
     _RRF_W_FTS5,
@@ -62,6 +63,16 @@ from skill_retriever import (
     _CONFIDENCE_THRESHOLD,
     _MIN_RRF_SCORE,
 )
+
+
+def test_embedding_timeout_defaults_to_two_seconds(monkeypatch):
+    monkeypatch.delenv("HERMES_EMBEDDING_TIMEOUT_SECONDS", raising=False)
+    assert _embedding_timeout_seconds() == 2.0
+
+
+def test_embedding_timeout_is_configurable(monkeypatch):
+    monkeypatch.setenv("HERMES_EMBEDDING_TIMEOUT_SECONDS", "0.75")
+    assert _embedding_timeout_seconds() == 0.75
 
 
 # ── _is_subsequence tests ─────────────────────────────────

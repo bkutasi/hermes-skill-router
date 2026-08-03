@@ -41,7 +41,7 @@ MANUAL_TRIGGERS = {
     "project-health-audit": ["project health", "audit project", "health audit"],
     "karpathy-guidelines": ["karpathy", "LLM coding guidelines"],
     "computer-use": ["computer use", "desktop automation", "click type"],
-    "hermes-plugin-auditing": ["plugin audit", "eagle-eye", "audit plugin"],
+    "hermes-plugin-auditing": ["plugin audit", "hermes skill router", "eagle-eye", "audit plugin"],
 }
 
 
@@ -177,7 +177,7 @@ def generate_synonyms(skills: list[dict]) -> dict[str, list[str]]:
 
 def write_triggers_py(triggers: list[tuple[str, str]], path: Path) -> None:
     lines = [
-        "# Auto-generated hard triggers for Eagle Eye",
+        "# Auto-generated hard triggers for Hermes Skill Router",
         f"# {len(triggers)} triggers — regenerate: python scripts/build_config.py",
         "",
         "_HARD_TRIGGERS: list[tuple[str, str]] = [",
@@ -191,7 +191,7 @@ def write_triggers_py(triggers: list[tuple[str, str]], path: Path) -> None:
 
 def write_synonyms_yaml(synonyms: dict[str, list[str]], path: Path) -> None:
     lines = [
-        "# Auto-generated skill synonym dictionary for Eagle Eye",
+        "# Auto-generated skill synonym dictionary for Hermes Skill Router",
         f"# {len(synonyms)} skills — regenerate: python scripts/build_config.py",
         "",
     ]
@@ -205,7 +205,7 @@ def write_synonyms_yaml(synonyms: dict[str, list[str]], path: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build Eagle Eye triggers + synonyms")
+    parser = argparse.ArgumentParser(description="Build Hermes Skill Router triggers + synonyms")
     parser.add_argument("--scan-only", action="store_true", help="List skills only")
     args = parser.parse_args()
 

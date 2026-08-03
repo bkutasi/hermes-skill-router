@@ -1,13 +1,12 @@
-"""eagle-eye plugin — Intelligent skill routing.
+"""Hermes Skill Router — lightweight intelligent skill routing.
 
 Wires one behaviour:
 
 * ``pre_llm_call`` hook — runs the skill retriever on each user query.
 
-  **L1 hard trigger hit**: Injects skill content directly into context
-  (capped at 4000 chars). No ``skill_view()`` round-trip needed. L1
-  matches skip curator tracking — they're deterministic keyword matches,
-  not judgment calls the curator needs to rank.
+  **L1 hard trigger hit**: Injects one high-confidence name/description hint.
+  The model loads canonical content through ``skill_view()`` so normal skill
+  freshness and usage tracking remain intact.
 
   **L2-5 pipeline hit**: Injects top skill names with descriptions as
   lightweight hints. The LLM decides whether to load them via
@@ -74,50 +73,17 @@ def _on_pre_llm_call(*, user_message: str = "", **_kwargs) -> dict | None:
             return None
 
         if layer == "L1":
-            # ── L1: Direct content injection — no skill_view() round-trip ──
-            #  Inject the skill content directly. L1 hard triggers are
-            #  deterministic keyword matches, so we skip skill_usage tracking.
+            # ── L1: Strong hint only; canonical content stays in skill_view ──
             skill_name = result.get("skill_name", skills[0])
-            content = retriever.get_skill_content(skill_name) or ""
-
-            # Paths may still be empty if L1 raced ahead of background init.
-            # Fall back to a lightweight name hint instead of empty injection.
-            if not content.strip():
-                desc = retriever.get_skill_desc(skill_name)
-                desc_bit = f" — {desc}" if desc else ""
-                hint = (
-                    f"## Skill Routing (Hard Trigger: {skill_name})\n"
-                    f'[System: The skill "{skill_name}" was matched with 100% confidence'
-                    f"{desc_bit}. Load via skill_view(\"{skill_name}\") "
-                    f"— content not yet cached.]\n"
-                )
-                logger.info(
-                    "Skill retriever L1: hint-only for %s (content not ready)",
-                    skill_name,
-                )
-                return {"context": hint}
-
-            # Cap injected content — full SKILL.md can be 100K+ chars
-            _L1_CAP = 4000
-            truncated = len(content) > _L1_CAP
-            body = content[:_L1_CAP] if truncated else content
-
-            truncation_note = ""
-            if truncated:
-                truncation_note = f' Truncated — call skill_view("{skill_name}") for full content.'
-
+            desc = retriever.get_skill_desc(skill_name)
+            desc_bit = f" — {desc}" if desc else ""
             hint = (
                 f"## Skill Routing (Hard Trigger: {skill_name})\n"
-                f'[System: The skill "{skill_name}" was matched with 100% confidence. '
-                f"Its content is injected below.{truncation_note}]\n\n"
-                f"---\n{body}\n---\n"
+                f'[System: The skill "{skill_name}" was matched with 100% confidence'
+                f"{desc_bit}. Load its canonical instructions via "
+                f'skill_view("{skill_name}") before acting.]\n'
             )
-
-            logger.info(
-                "Skill retriever L1: direct injection of %s (%d chars%s)",
-                skill_name, len(body),
-                ", truncated" if truncated else "",
-            )
+            logger.info("Skill retriever L1: strong hint for %s", skill_name)
             return {"context": hint}
 
         # ── L2-5: Inject hint with descriptions ──
@@ -159,14 +125,14 @@ def _on_pre_llm_call(*, user_message: str = "", **_kwargs) -> dict | None:
 def register(ctx) -> None:
     """Register the pre_llm_call hook with Hermes plugin system."""
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
-    logger.info("eagle-eye plugin registered (pre_llm_call hook)")
+    logger.info("hermes-skill-router plugin registered (pre_llm_call hook)")
     # Kick off singleton init in background; avoid noisy racey emb warnings.
     try:
         from .skill_retriever import get_skill_retriever
         retriever = get_skill_retriever()
         if retriever.is_embedding_ready():
-            logger.info("eagle-eye: embedding layer operational (L4 active)")
+            logger.info("hermes-skill-router: embedding layer operational (L4 active)")
         else:
-            logger.info("eagle-eye: embedding init started (background)")
+            logger.info("hermes-skill-router: embedding init started (background)")
     except Exception as e:
-        logger.warning("eagle-eye: could not start retriever: %s", e)
+        logger.warning("hermes-skill-router: could not start retriever: %s", e)

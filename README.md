@@ -1,10 +1,11 @@
-# Eagle Eye — skill routing for Hermes Agent
+# Hermes Skill Router
 
 Narrow a large skill library to the few that matter **before** the model call.
 Zero Hermes core patches: one user plugin, `pre_llm_call` hook only.
 
-Fork of [willingning-coder/eagle-eye](https://github.com/willingning-coder/eagle-eye)
-with HTTP embeddings, nested skill dirs, and a real config generator.
+An independently maintained Hermes plugin, evolved from the original Eagle Eye
+concept with a rewritten retrieval pipeline, HTTP embeddings, durable caches,
+nested skill discovery, and safe plugin migration.
 
 ## How it works
 
@@ -12,7 +13,7 @@ with HTTP embeddings, nested skill dirs, and a real config generator.
 User message
     │
     ▼
- L1 hard triggers  →  hit: inject SKILL.md (cap 4k chars)
+ L1 hard triggers  →  hit: inject one strong skill_view hint
     │ miss
     ▼
  L2 BM25 (name+desc) + L3 synonyms + L4 HTTP emb  →  RRF (L5)
@@ -21,7 +22,7 @@ User message
       score low → silent (general knowledge)
 ```
 
-- **L1**: deterministic keyword match (short ASCII = word-boundary; case-insensitive).
+- **L1**: deterministic keyword match that routes through canonical `skill_view()`.
 - **L2–5**: ranking only — the model still chooses `skill_view()` or ignore.
 - **Degrade**: emb down → L2+L3; never crash the turn.
 - **Coexist**: does not remove Hermes’ full skill index.
@@ -29,8 +30,8 @@ User message
 ## Quick start
 
 ```bash
-git clone https://github.com/bkutasi/eagle-eye.git
-cd eagle-eye
+git clone https://github.com/bkutasi/hermes-skill-router.git
+cd hermes-skill-router
 
 # optional: point at your emb server (see docs/embedding-server.md)
 # echo 'HERMES_EMBEDDING_BASE_URL=http://localhost:3001/v1' >> ~/.hermes/.env
@@ -54,8 +55,8 @@ Caches (under `~/.hermes/`):
 
 | File | Purpose |
 |------|---------|
-| `.eagle_eye_text_index.npz` | synonyms + BM25 tokens (avoids jieba rebuild every process) |
-| `.eagle_eye_emb_cache.npz` | dense matrix; row reuse when only some skills change |
+| `.hermes_skill_router_text_index.npz` | synonyms + BM25 tokens (avoids jieba rebuild every process) |
+| `.hermes_skill_router_emb_cache.npz` | dense matrix; row reuse when only some skills change |
 
 ## Layout
 
@@ -82,6 +83,7 @@ ARCHITECTURE.md             # design notes
 | `HERMES_EMBEDDING_MODEL` | `default` | |
 | `HERMES_EMBEDDING_API_KEY` | empty | |
 | `HERMES_EMBEDDING_BATCH_SIZE` | `16` | |
+| `HERMES_EMBEDDING_TIMEOUT_SECONDS` | `2` | Bounds local HTTP failure latency |
 | `HERMES_SKILL_RETRIEVAL_TOP_K` | `5` | |
 | `HERMES_DISABLE_SKILL_RETRIEVAL` | unset | `1` to off |
 

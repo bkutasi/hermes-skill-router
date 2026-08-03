@@ -1,9 +1,9 @@
-name: eagle-eye
-version: 1.3.0
-description: "5-layer intelligent skill matching — narrows 100+ skills to top-5 via hard triggers, BM25, synonym dictionary, dense embedding (HTTP API), and RRF fusion. Zero core modification."
+name: hermes-skill-router
+version: 2.0.0
+description: "Lean five-layer Hermes skill routing with hint-only hard triggers, BM25, synonyms, HTTP embeddings, and RRF fusion."
 author: "bkutasi"
 license: "MIT"
-homepage: "https://github.com/bkutasi/eagle-eye"
+homepage: "https://github.com/bkutasi/hermes-skill-router"
 hooks:
   - pre_llm_call
 dependencies:
@@ -29,3 +29,6 @@ env:
   - name: HERMES_EMBEDDING_BATCH_SIZE
     description: Batch size for HTTP embedding calls
     default: "16"
+  - name: HERMES_EMBEDDING_TIMEOUT_SECONDS
+    description: Per-request embedding HTTP timeout in seconds
+    default: "2"
