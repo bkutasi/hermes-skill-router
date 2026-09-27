@@ -22,6 +22,7 @@ import re
 import threading
 import time
 from collections import Counter, OrderedDict, defaultdict
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -112,6 +113,74 @@ def _is_subsequence(chars: list[str], text: str, max_gap: int = 3) -> bool:
     return True
 
 
+def _extract_description(content: str) -> str:
+    if not content.startswith("---"):
+        return ""
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        return ""
+    for line in parts[1].split("\n"):
+        if line.strip().startswith("description:"):
+            return line.strip()[12:].strip().strip("\"'")
+    return ""
+
+
+def scan_skill_dir(
+    base_dir: Path, seen: set[str]
+) -> Iterator[tuple[str, str, Path, str]]:
+    """Yield ``(name, description, path, category)`` for each skill under *base_dir*.
+
+    Handles flat (``skills/<name>/SKILL.md``) and nested
+    (``skills/<category>/<name>/SKILL.md`` plus skill packages nested under a
+    parent skill dir) layouts, in sorted order. Skips hidden dirs
+    (``.archive``, ``.hub``, ``.curator_backups``, …) and unreadable files.
+    """
+    for entry in sorted(base_dir.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        skill_md = entry / "SKILL.md"
+        if skill_md.exists():
+            name = entry.name
+            if name not in seen:
+                try:
+                    desc = _extract_description(skill_md.read_text(encoding="utf-8"))
+                    seen.add(name)
+                    yield name, desc, skill_md, base_dir.name
+                except Exception:
+                    pass
+            # Nested skill packages under a parent skill dir
+            # (e.g. telegram-formatting/telegram-media-delivery/)
+            try:
+                for sub in sorted(entry.iterdir()):
+                    if (
+                        sub.is_dir()
+                        and not sub.name.startswith(".")
+                        and (sub / "SKILL.md").exists()
+                        and sub.name not in seen
+                    ):
+                        try:
+                            sm = sub / "SKILL.md"
+                            desc = _extract_description(sm.read_text(encoding="utf-8"))
+                            seen.add(sub.name)
+                            yield sub.name, desc, sm, entry.name
+                        except Exception:
+                            pass
+            except OSError:
+                pass
+        else:
+            # Category directory — recurse (skip hidden children)
+            try:
+                has_skill_md = any(
+                    (sub / "SKILL.md").exists()
+                    for sub in entry.iterdir()
+                    if sub.is_dir() and not sub.name.startswith(".")
+                )
+            except OSError:
+                has_skill_md = False
+            if has_skill_md:
+                yield from scan_skill_dir(entry, seen)
+
+
 def get_skill_retriever() -> "SkillRetriever":
     """Return the global singleton, creating it on first call."""
     global _SINGLETON
@@ -136,7 +205,6 @@ class SkillRetriever:
         # Synonym structures
         self._synonyms: dict[str, list[str]] = {}       # skill → [syn, ...]
         self._synonym_index: dict[str, list[tuple[str, float]]] = {}  # token → [(skill, weight)]
-        self._skill_paths: dict[str, Path] = {}          # skill_name → SKILL.md path
         self._skill_name_to_idx: dict[str, int] = {}      # skill_name → list index (O(1) lookup)
         # Embedding (HTTP-based, no local model)
         self._emb_matrix = None
@@ -174,14 +242,14 @@ class SkillRetriever:
     def retrieve(self, query: str, top_k: int | None = None) -> list[str]:
         """Return top-k skill names matching the query.
 
-        For detailed match info (including layer and content), use
+        For detailed match info (including layer), use
         ``retrieve_detailed()`` instead.
         """
         result = self.retrieve_detailed(query, top_k)
         return result["skills"]
 
     def retrieve_detailed(self, query: str, top_k: int | None = None) -> dict:
-        """Return detailed match info: skills, layer, and content.
+        """Return detailed match info: skills, layer, and skill name.
 
         Returns:
             {
@@ -239,17 +307,6 @@ class SkillRetriever:
         except Exception as e:
             logger.warning("Skill retrieval failed: %s", e)
             return {"skills": [], "layer": "none"}
-
-    def get_skill_content(self, skill_name: str) -> str | None:
-        """Read and return the full SKILL.md content for a skill."""
-        path = self._skill_paths.get(skill_name)
-        if path and path.exists():
-            try:
-                return path.read_text(encoding="utf-8")
-            except Exception:
-                pass
-        logger.warning("Skill content not found for %s (not in cache)", skill_name)
-        return None
 
     def get_skill_desc(self, skill_name: str) -> str:
         """Return the description for a skill, or empty string if unknown."""
@@ -480,7 +537,6 @@ class SkillRetriever:
         # Always rebuild lists — append-only would duplicate on retry/re-init.
         self._skill_names = []
         self._skill_descs = []
-        self._skill_paths = {}
         self._doc_tokens = []
 
         seen = set()
@@ -492,75 +548,11 @@ class SkillRetriever:
     def _scan_skill_dir(
         self, base_dir: Path, seen: set[str]
     ) -> None:
-        """Recursively scan for SKILL.md files — handles flat and nested layouts.
+        """Populate names/descs from :func:`scan_skill_dir` (kept for direct callers)."""
+        for name, desc, _path, _category in scan_skill_dir(base_dir, seen):
+            self._skill_names.append(name)
+            self._skill_descs.append(desc)
 
-        Flat:   skills/<name>/SKILL.md
-        Nested: skills/<category>/<name>/SKILL.md
-
-        Skips hidden dirs (``.archive``, ``.hub``, ``.curator_backups``, …).
-        """
-        for entry in sorted(base_dir.iterdir()):
-            if not entry.is_dir() or entry.name.startswith("."):
-                continue
-            skill_md = entry / "SKILL.md"
-            if skill_md.exists():
-                name = entry.name
-                if name not in seen:
-                    try:
-                        content = skill_md.read_text(encoding="utf-8")
-                        desc = self._extract_description(content)
-                        seen.add(name)
-                        self._skill_names.append(name)
-                        self._skill_descs.append(desc)
-                        self._skill_paths[name] = skill_md
-                    except Exception:
-                        pass
-                # Nested skill packages under a parent skill dir
-                # (e.g. telegram-formatting/telegram-media-delivery/)
-                try:
-                    for sub in sorted(entry.iterdir()):
-                        if (
-                            sub.is_dir()
-                            and not sub.name.startswith(".")
-                            and (sub / "SKILL.md").exists()
-                            and sub.name not in seen
-                        ):
-                            try:
-                                sm = sub / "SKILL.md"
-                                content = sm.read_text(encoding="utf-8")
-                                desc = self._extract_description(content)
-                                seen.add(sub.name)
-                                self._skill_names.append(sub.name)
-                                self._skill_descs.append(desc)
-                                self._skill_paths[sub.name] = sm
-                            except Exception:
-                                pass
-                except OSError:
-                    pass
-            else:
-                # Category directory — recurse (skip hidden children)
-                try:
-                    has_skill_md = any(
-                        (sub / "SKILL.md").exists()
-                        for sub in entry.iterdir()
-                        if sub.is_dir() and not sub.name.startswith(".")
-                    )
-                except OSError:
-                    has_skill_md = False
-                if has_skill_md:
-                    self._scan_skill_dir(entry, seen)
-
-    @staticmethod
-    def _extract_description(content: str) -> str:
-        if not content.startswith("---"):
-            return ""
-        parts = content.split("---", 2)
-        if len(parts) < 3:
-            return ""
-        for line in parts[1].split("\n"):
-            if line.strip().startswith("description:"):
-                return line.strip()[12:].strip().strip("\"'")
-        return ""
 
     def _load_synonyms(self) -> None:
         """Load synonym dictionary — Layer 3 source data."""

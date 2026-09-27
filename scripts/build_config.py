@@ -11,6 +11,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+from skill_retriever import scan_skill_dir
+
 STOP_WORDS = {
     "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
     "have", "has", "had", "do", "does", "did", "will", "would", "could",
@@ -45,75 +48,19 @@ MANUAL_TRIGGERS = {
 }
 
 
-def _extract_description(content: str) -> str:
-    if not content.startswith("---"):
-        return ""
-    parts = content.split("---", 2)
-    if len(parts) < 3:
-        return ""
-    for line in parts[1].split("\n"):
-        if line.strip().startswith("description:"):
-            return line.strip()[12:].strip().strip("\"'")
-    return ""
-
-
-def _discover_from_dir(base_dir: Path, skills: list[dict], seen: set[str]) -> None:
-    """Keep in sync with skill_retriever._scan_skill_dir (skip dotdirs)."""
-    for entry in sorted(base_dir.iterdir()):
-        if not entry.is_dir() or entry.name.startswith("."):
-            continue
-        skill_md = entry / "SKILL.md"
-        if skill_md.exists():
-            name = entry.name
-            if name not in seen:
-                content = skill_md.read_text(encoding="utf-8")
-                seen.add(name)
-                skills.append({
-                    "name": name,
-                    "category": base_dir.name,
-                    "description": _extract_description(content),
-                    "path": str(skill_md),
-                })
-            # Nested packages under parent skill (keep in sync with skill_retriever)
-            try:
-                for sub in sorted(entry.iterdir()):
-                    if (
-                        sub.is_dir()
-                        and not sub.name.startswith(".")
-                        and (sub / "SKILL.md").exists()
-                        and sub.name not in seen
-                    ):
-                        sm = sub / "SKILL.md"
-                        content = sm.read_text(encoding="utf-8")
-                        seen.add(sub.name)
-                        skills.append({
-                            "name": sub.name,
-                            "category": entry.name,
-                            "description": _extract_description(content),
-                            "path": str(sm),
-                        })
-            except OSError:
-                pass
-        else:
-            try:
-                has_skill_md = any(
-                    (sub / "SKILL.md").exists()
-                    for sub in entry.iterdir()
-                    if sub.is_dir() and not sub.name.startswith(".")
-                )
-            except OSError:
-                has_skill_md = False
-            if has_skill_md:
-                _discover_from_dir(entry, skills, seen)
-
-
 def discover_skills() -> list[dict]:
     hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
     skills: list[dict] = []
     seen: set[str] = set()
     for base_dir in (hermes_home / "skills", hermes_home / "hermes-agent" / "skills"):
         if base_dir.exists():
-            _discover_from_dir(base_dir, skills, seen)
+            for name, desc, skill_md, category in scan_skill_dir(base_dir, seen):
+                skills.append({
+                    "name": name,
+                    "category": category,
+                    "description": desc,
+                    "path": str(skill_md),
+                })
     return skills
 
 

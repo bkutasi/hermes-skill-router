@@ -34,7 +34,7 @@ def _load_plugin(fake_retriever):
     return module
 
 
-def test_l1_is_hint_only_and_never_reads_skill_content():
+def test_l1_hint_includes_skill_view_and_description():
     retriever = MagicMock()
     retriever.retrieve_detailed.return_value = {
         "skills": ["test-driven-development"],
@@ -48,7 +48,6 @@ def test_l1_is_hint_only_and_never_reads_skill_content():
 
     assert 'skill_view("test-driven-development")' in result["context"]
     assert "TDD workflow" in result["context"]
-    retriever.get_skill_content.assert_not_called()
 
 
 def test_manifest_and_installer_use_new_identity_and_migrate_old_name():

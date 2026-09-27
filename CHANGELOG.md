@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+### Changed
+- Share skill discovery and description parsing between the offline config builder and runtime router; remove the unused full-content reader and skill-path cache. Routing and incremental embedding reuse are unchanged.
+
 ## [1.3.0] - 2026-07-17
 
 ### Changed

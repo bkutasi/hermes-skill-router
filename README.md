@@ -27,6 +27,22 @@ User message
 - **Degrade**: emb down → L2+L3; never crash the turn.
 - **Coexist**: does not remove Hermes’ full skill index.
 
+### Alongside Hermes progressive disclosure
+
+Hermes already exposes a compact skill index (names and descriptions) so the
+agent can choose a skill, then loads its full `SKILL.md` through `skill_view()`
+only when requested. This plugin does **not** replace that index or load skill
+bodies. On each user message, its `pre_llm_call` hook searches the live skill
+names and descriptions and adds a short, query-specific hint: one strong L1
+match or a ranked L2–5 shortlist. The agent still decides what to open; a
+low-confidence query adds nothing. The benefit is a more focused picker hint
+when the existing index is large, not a new disclosure mechanism or a smaller
+base index. Hints themselves consume some tokens on matching turns.
+
+After `skill_view()`, Hermes' normal handling of references, assets, and
+executable scripts remains unchanged; the router neither loads those files
+nor runs scripts.
+
 ## Quick start
 
 ```bash

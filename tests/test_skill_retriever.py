@@ -53,6 +53,7 @@ sys.modules.setdefault("hermes_constants", _hermes_const)
 # ── Import after mocks are in place ──────────────────────
 from skill_retriever import (
     SkillRetriever,
+    _extract_description,
     _embedding_timeout_seconds,
     _is_subsequence,
     _HARD_TRIGGERS,
@@ -258,31 +259,31 @@ class TestExtractDescription:
     def test_basic_frontmatter(self):
         """Standard frontmatter with description field."""
         content = "---\ndescription: Test skill\n---\n# Body"
-        assert SkillRetriever._extract_description(content) == "Test skill"
+        assert _extract_description(content) == "Test skill"
 
     def test_no_frontmatter(self):
         """No frontmatter returns empty string."""
-        assert SkillRetriever._extract_description("# No frontmatter") == ""
+        assert _extract_description("# No frontmatter") == ""
 
     def test_quoted_description(self):
         """Quoted description value is unquoted."""
         content = '---\ndescription: "Quoted desc"\n---\n'
-        assert SkillRetriever._extract_description(content) == "Quoted desc"
+        assert _extract_description(content) == "Quoted desc"
 
     def test_single_quoted(self):
         """Single-quoted description is unquoted."""
         content = "---\ndescription: 'Single quoted'\n---\n"
-        assert SkillRetriever._extract_description(content) == "Single quoted"
+        assert _extract_description(content) == "Single quoted"
 
     def test_no_description_field(self):
         """Frontmatter without description field returns empty."""
         content = "---\nname: some-skill\n---\n"
-        assert SkillRetriever._extract_description(content) == ""
+        assert _extract_description(content) == ""
 
     def test_incomplete_frontmatter(self):
         """Only one --- delimiter returns empty."""
         content = "---\ndescription: test\n"
-        assert SkillRetriever._extract_description(content) == ""
+        assert _extract_description(content) == ""
 
 
 # ── Singleton pattern tests ────────────────────────────────
@@ -509,7 +510,6 @@ class TestScanSkillDir:
         r = SkillRetriever()
         r._skill_names = []
         r._skill_descs = []
-        r._skill_paths = {}
         r._scan_skill_dir(skills, set())
         assert r._skill_names == ["live-skill"]
         assert "dead-skill" not in r._skill_names
@@ -528,10 +528,37 @@ class TestScanSkillDir:
         r = SkillRetriever()
         r._skill_names = []
         r._skill_descs = []
-        r._skill_paths = {}
         r._scan_skill_dir(skills, set())
         assert "telegram-formatting" in r._skill_names
         assert "telegram-media-delivery" in r._skill_names
+
+    def test_builder_and_runtime_share_skill_discovery(self, tmp_path, monkeypatch):
+        from importlib.util import module_from_spec, spec_from_file_location
+
+        builder_path = SRC_DIR.parent / "scripts" / "build_config.py"
+        spec = spec_from_file_location("build_config", builder_path)
+        builder = module_from_spec(spec)
+        spec.loader.exec_module(builder)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        for rel, desc in (
+            ("skills/parent", "parent"),
+            ("skills/parent/child", "child"),
+            ("skills/.archive/hidden", "hidden"),
+            ("hermes-agent/skills/parent", "duplicate"),
+        ):
+            skill = tmp_path / rel
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text(f"---\ndescription: {desc}\n---\n", encoding="utf-8")
+
+        discovered = builder.discover_skills()
+        runtime = SkillRetriever()
+        runtime._skill_names, runtime._skill_descs = [], []
+        seen = set()
+        for base in (tmp_path / "skills", tmp_path / "hermes-agent" / "skills"):
+            runtime._scan_skill_dir(base, seen)
+        assert [(s["name"], s["description"]) for s in discovered] == [
+            ("parent", "parent"), ("child", "child")
+        ] == list(zip(runtime._skill_names, runtime._skill_descs))
 
 
 class TestTriggerFilter:
@@ -549,7 +576,6 @@ class TestTriggerFilter:
         r = SkillRetriever()
         r._skill_names = ["live-skill"]
         r._skill_descs = ["live"]
-        r._skill_paths = {"live-skill": Path("/tmp/x")}
         # Simulate the filter block from _lazy_init
         valid = set(r._skill_names)
         sr_mod._HARD_TRIGGERS = [
